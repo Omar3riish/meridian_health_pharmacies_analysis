@@ -19,7 +19,7 @@ ALIASES = {
     "product_category": ["product_category", "category", "category_name"],
     "region": ["region", "state", "province", "area"],
     "city": ["city", "town"],
-    "customer_type": ["customer_type", "customer_segment_type", "client_type"],
+    "customer_type": ["customer_type", "customer_segment_type", "client_type", "customer_segment"],
 }
 
 
