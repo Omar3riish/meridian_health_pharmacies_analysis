@@ -39,8 +39,8 @@ with st.sidebar:
     source_mode = st.selectbox(
         "Data connection",
         ["PostgreSQL first, CSV fallback", "CSV only", "PostgreSQL only"],
-        index=0,
-        help="The recommended mode tries PostgreSQL for each dataset and uses the matching CSV when the database/table is unavailable."
+        index=1,
+        help="CSV only is the safe default for this deployment. Choose PostgreSQL first when you have configured a reachable hosted database."
     )
     page = st.radio(
         "Explore dashboard",
@@ -89,10 +89,10 @@ with st.sidebar.expander("Loaded data sources", expanded=False):
     st.write(f"**Products:** {len(products):,}")
 
 if sales.empty:
-    st.warning(
-        "No sales rows were loaded. Add your sales CSV files under `data/raw/` "
-        "or configure PostgreSQL in `.streamlit/secrets.toml`. See README.md."
-    )
+    st.error("No sales rows were loaded. Check the data-source diagnostics below.")
+    st.write("Expected sales files: data/processed/fact_sales.csv or the three sales-group CSVs in data/raw/.")
+    for key, note in source_notes.items():
+        st.write(f"- **{key}:** {note}")
     st.stop()
 
 # Shared filters
