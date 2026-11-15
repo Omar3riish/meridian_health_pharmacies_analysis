@@ -121,7 +121,7 @@ def show_chart(fig, key=None):
     st.plotly_chart(chart_theme(fig), use_container_width=True, config={"displaylogo": False}, key=key)
 
 # ---------------------------------------------------------------------
-# CSV Data Loader
+# CSV Data Loader with Multi-Path Resolution
 # ---------------------------------------------------------------------
 TABLES = [
     "fact_sales", "fact_stock_log", "fact_prescriptions",
@@ -132,12 +132,31 @@ TABLES = [
 @st.cache_data(show_spinner="Loading Meridian data from CSV files...")
 def load_csv_data() -> Dict[str, pd.DataFrame]:
     frames = {}
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    cwd = os.getcwd()
+    
+    search_dirs = [
+        current_dir, 
+        parent_dir, 
+        cwd, 
+        os.path.join(parent_dir, "meridian_streamlit_dashboard"), 
+        os.path.join(cwd, "meridian_streamlit_dashboard")
+    ]
+    
     for table in TABLES:
         filename = f"{table}.csv"
-        if os.path.exists(filename):
-            frames[table] = pd.read_csv(filename)
+        found_path = None
+        for d in search_dirs:
+            candidate = os.path.join(d, filename)
+            if os.path.exists(candidate):
+                found_path = candidate
+                break
+        
+        if found_path:
+            frames[table] = pd.read_csv(found_path)
         else:
-            raise FileNotFoundError(f"Required CSV file {filename} not found in working directory.")
+            raise FileNotFoundError(f"Required CSV file '{filename}' was not found in any expected directory.")
     return frames
 
 def normalize_and_map_data(frames):
