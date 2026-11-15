@@ -1,131 +1,75 @@
-# Meridian Health Data Analytics
+# Meridian Health — Digitera Executive BI Suite
 
-An interactive pharmacy analytics dashboard built with **Python, Streamlit, PostgreSQL, Pandas and Plotly**.
+A six-page Streamlit pharmacy retail analytics application styled with the Digitera visual identity.
 
-## Dashboard sections
-
-- Executive Overview: revenue, profit (when cost data is available), orders and customer KPIs.
-- Sales Analysis: product category and payment-method performance.
-- Customer Analysis: RFM segmentation.
-- Product & Inventory: product catalog and stock-condition records.
-- Store & Geographic Analysis: store-level performance.
-- Cohort Analysis: attribute-based cohorts by geography, product category, store, customer type and payment method. These are not limited to time-based cohorts.
-- Data Quality: missing values, distinct values and duplicate-row checks.
-
-## Project structure
-
-```text
-data/
-  raw/                 # Original CSV files
-  processed/           # Cleaned/consolidated CSV files
-streamlit_app/
-  app.py
-  utils/
-    data_loader.py
-    analytics.py
-requirements.txt
-.streamlit/
-  secrets.toml.example
-```
-
-## 1. Install and run locally
-
-Use Python 3.10 or newer.
+## Run locally
 
 ```bash
 python -m venv .venv
-```
-
-Activate the environment:
-
-**Windows PowerShell**
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-**macOS / Linux**
-```bash
-source .venv/bin/activate
-```
-
-Install dependencies and run:
-
-```bash
+# Windows: .venv\\Scripts\\activate
+# macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run streamlit_app/app.py
+streamlit run app.py
 ```
 
-## 2. CSV files
+The app starts immediately in **synthetic demo mode**. No credentials are required.
 
-Place your CSV files in `data/raw/`. The loader recognizes these names:
+## Connect PostgreSQL
 
-- `sales_group1_storesA.csv`
-- `sales_group2_storesB.csv`
-- `sales_group3_storesC.csv`
-- `customers_master.csv`
-- `products_catalog.csv`
-- `stores.csv`
-- `stock_condition_log.csv`
-- `employees.csv`
-- `prescriptions_log.csv`
-- `categories.csv`
-- `suppliers.csv`
+Set `DATABASE_URL` to a PostgreSQL SQLAlchemy URL. Example:
 
-A consolidated `fact_sales.csv`, `sales_cleaned.csv` or `cleaned_sales.csv` in `data/processed/` is preferred over combining the three sales-group files.
+```bash
+# Windows PowerShell
+$env:DATABASE_URL = "postgresql+psycopg://username:password@localhost:5432/meridian"
 
-## 3. PostgreSQL connection
+# macOS/Linux
+export DATABASE_URL="postgresql+psycopg://username:password@localhost:5432/meridian"
+streamlit run app.py
+```
 
-The default PostgreSQL table mapping is in `streamlit_app/utils/data_loader.py`. Update `DEFAULT_TABLES` or override table names in `.streamlit/secrets.toml`.
+The database must contain these tables and the columns used by the app:
 
-Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and enter your database URL. Keep the real `secrets.toml` private; it is ignored by Git.
+- `fact_sales`
+- `fact_stock_log`
+- `fact_prescriptions`
+- `dim_products`
+- `dim_stores`
+- `dim_customers`
+- `dim_categories`
+- `dim_employees`
 
-The default fact table name is `fact_sales`. The customer, product and store dimension table names are assumptions and may need to be changed to match your actual database.
+Use the schema in the supplied SQL as the source of truth. The app expects `discount_pct` as a fraction (e.g. `0.10` for 10%), consistent with the supplied SQL expressions.
 
-The recommended source mode tries PostgreSQL first for each dataset and falls back to its CSV equivalent if a table cannot be loaded. CSV files are not appended to PostgreSQL results, which avoids accidental double-counting of the same transactions.
+## Data behavior and assumptions
 
-For deployment, use a hosted PostgreSQL database reachable from Streamlit Community Cloud. A local database on your laptop is not reachable by the cloud app.
+- The financial measures follow the requested SQL logic:
+  - Gross Revenue = `SUM(quantity * unit_price)`
+  - Net Revenue = `SUM(quantity * unit_price * (1 - COALESCE(discount_pct, 0)))`
+  - Total Cost = `SUM(quantity * cost_price)`
+  - Net Profit = Net Revenue − Total Cost
+  - Profit Margin = Net Profit / Net Revenue × 100
+- Sales `unit_price` is used for transaction revenue; product `cost_price` is used for cost.
+- The inventory turnover metric is explicitly a directional proxy (units sold divided by current stock), not a formal time-normalized COGS turnover.
+- CLV is displayed as observed cumulative net revenue, not a predictive model.
+- Cohort and funnel thresholds follow the uploaded SQL: repeat = 2+ orders; loyal = 5+ orders.
+- The uploaded text inventory extract is a flattened/pivot-style report, not a complete `fact_stock_log` table. It is not silently loaded as normalized stock data. Load the normalized fact and dimension tables to use live database mode.
+- Synthetic data is deterministic and intended for UI/logic demonstration only.
 
-## 4. Expected sales fields
+## Production deployment checklist
 
-The sales fact table/CSV should contain as many of these fields as possible:
+1. Configure secrets through the hosting platform; never commit credentials.
+2. Use a least-privilege, read-only database account for analytics.
+3. Add database indexes on date and foreign-key columns.
+4. Validate source table names, key uniqueness, currency, timezone, and discount conventions.
+5. Add row-level access controls if users must only see permitted regions/stores.
+6. Add observability, automated tests, and deployment health checks before production use.
+7. Do not expose customer-level identifiable or prescription-level patient details in shared dashboards.
 
-- `sale_id`
-- `customer_id`
-- `store_id`
-- `employee_id`
-- `product_id`
-- `sale_date`
-- `quantity`
-- `unit_price`
-- `discount_pct`
-- `payment_method`
+## Included pages
 
-Revenue is calculated as:
-
-`quantity * unit_price * (1 - discount_rate)`
-
-`discount_pct` can be stored as either a decimal (0.10) or percentage (10). If a `revenue` column already exists, it is used instead.
-
-Profit is calculated only when a unit cost / `cost_price` or `cost_amount` is available. The dashboard does not invent missing cost data.
-
-## 5. Important schema note
-
-This starter is designed around the known Meridian Health sales fields. The exact names and relationships of your dimension and inventory tables still need to be checked against your PostgreSQL schema. Adjust table mappings and aliases before relying on every dashboard page.
-
-## 6. Deploy
-
-1. Push this repository to GitHub.
-2. Open [Streamlit Community Cloud](https://share.streamlit.io/).
-3. Create an app and select this repository.
-4. Set the main file path to `streamlit_app/app.py`.
-5. Add your PostgreSQL connection details under the app's **Secrets** settings.
-6. Deploy.
-
-Do not commit customer-identifiable, confidential or otherwise restricted source data. Confirm you have permission to publish any dataset.
-
-## Limitations
-
-- Some charts appear only when the required columns exist.
-- The inventory page currently displays available stock-condition records; inventory KPIs require confirmation of the stock log's fields and business definitions.
-- The cohort page implements attribute-based cohorts (region/city, product category, store, customer type and payment method), not only monthly cohorts.
-- Funnel analysis is not fabricated from sales transactions. It requires defined funnel stages or event data.
+1. Executive Overview
+2. Sales Analysis
+3. Customer Analysis (RFM, observed CLV, new/returning)
+4. Product & Inventory Analysis
+5. Store & Geographic Analysis
+6. Customer Behavior Analysis
