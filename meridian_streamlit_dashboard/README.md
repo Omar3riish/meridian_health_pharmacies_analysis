@@ -117,7 +117,7 @@ This starter is designed around the known Meridian Health sales fields. The exac
 1. Push this repository to GitHub.
 2. Open [Streamlit Community Cloud](https://share.streamlit.io/).
 3. Create an app and select this repository.
-4. Set the main file path to `streamlit_app/app.py`.
+4. Set the main file path to `meridian_streamlit_dashboard/streamlit_app/app.py` when the repository root is selected.
 5. Add your PostgreSQL connection details under the app's **Secrets** settings.
 6. Deploy.
 
