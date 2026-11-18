@@ -346,6 +346,8 @@ def _standardize_columns(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
     frame.columns = [str(c).strip().lower().replace(" ", "_").replace("-", "_") for c in frame.columns]
     aliases = {
+        "product_id": ["productid", "item_id", "medicine_id", "drug_id"],
+        "store_id": ["storeid", "branch_id", "pharmacy_id", "location_id"],
         "expiry_date": ["expiration_date", "expire_date", "expiry", "expiration", "expiration_datetime"],
         "last_restocked": ["last_restock_date", "restock_date", "last_restock", "restocked_at"],
         "shelf_life_status": ["expiry_status", "expiration_status", "stock_status", "batch_status"],
@@ -433,11 +435,22 @@ def normalize_data(frames):
     categories = _ensure_column(categories, "category_name", "Uncategorized")
     d["dim_categories"] = categories
 
-    # Inventory: expiry and restock dates are optional in many stock schemas.
-    stock = d["fact_stock_log"]
-    for col in ["product_id", "store_id", "quantity"]:
-        if col not in stock.columns:
-            raise ValueError(f"fact_stock_log.csv must contain {col}")
+    # Inventory: source schemas vary considerably. Keep valid stock records when
+    # product/store keys exist; otherwise create an explicit zero-stock scaffold
+    # from the dimensions instead of stopping the entire dashboard.
+    stock = d["fact_stock_log"].copy()
+    stock_keys_available = all(c in stock.columns for c in ["product_id", "store_id"])
+    if not stock_keys_available or stock.empty:
+        stock = pd.MultiIndex.from_product(
+            [products["product_id"].dropna().unique(), stores["store_id"].dropna().unique()],
+            names=["product_id", "store_id"],
+        ).to_frame(index=False)
+        stock["quantity"] = 0
+        stock["condition_notes"] = "Inventory keys missing in source CSV; zero-stock placeholder"
+    elif "quantity" not in stock.columns:
+        stock["quantity"] = 0
+        stock["condition_notes"] = "Quantity missing in source CSV; treated as zero"
+
     stock["quantity"] = pd.to_numeric(stock["quantity"], errors="coerce").fillna(0)
     expiry_source = stock["expiry_date"] if "expiry_date" in stock.columns else pd.Series(pd.NaT, index=stock.index)
     restock_source = stock["last_restocked"] if "last_restocked" in stock.columns else pd.Series(pd.NaT, index=stock.index)
