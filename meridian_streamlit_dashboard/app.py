@@ -121,7 +121,7 @@ def show_chart(fig, key=None):
     st.plotly_chart(chart_theme(fig), use_container_width=True, config={"displaylogo": False}, key=key)
 
 # ---------------------------------------------------------------------
-# CSV Data Loader with Multi-Path Resolution
+# CSV Data Loader
 # ---------------------------------------------------------------------
 TABLES = [
     "fact_sales", "fact_stock_log", "fact_prescriptions",
@@ -132,31 +132,12 @@ TABLES = [
 @st.cache_data(show_spinner="Loading Meridian data from CSV files...")
 def load_csv_data() -> Dict[str, pd.DataFrame]:
     frames = {}
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    cwd = os.getcwd()
-    
-    search_dirs = [
-        current_dir, 
-        parent_dir, 
-        cwd, 
-        os.path.join(parent_dir, "meridian_streamlit_dashboard"), 
-        os.path.join(cwd, "meridian_streamlit_dashboard")
-    ]
-    
     for table in TABLES:
         filename = f"{table}.csv"
-        found_path = None
-        for d in search_dirs:
-            candidate = os.path.join(d, filename)
-            if os.path.exists(candidate):
-                found_path = candidate
-                break
-        
-        if found_path:
-            frames[table] = pd.read_csv(found_path)
+        if os.path.exists(filename):
+            frames[table] = pd.read_csv(filename)
         else:
-            raise FileNotFoundError(f"Required CSV file '{filename}' was not found in any expected directory.")
+            raise FileNotFoundError(f"Required CSV file {filename} not found in working directory.")
     return frames
 
 def normalize_and_map_data(frames):
@@ -305,271 +286,44 @@ st.sidebar.caption("Financial basis: net of discounts · product cost")
 # Page 1 — Executive Overview
 # ---------------------------------------------------------------------
 if page == "Executive Overview":
-    page_heading(
-        "Executive dashboard",
-        "Executive Overview",
-        "A decision-ready view of revenue, profitability, store performance and prescription operations."
-    )
-
-    # -----------------------------------------------------------------
-    # KPI Overview — Original Design Preserved
-    # -----------------------------------------------------------------
+    page_heading("Executive dashboard", "Executive Overview", "A decision-ready view of revenue, profitability, store performance and prescription operations.")
     cols = st.columns(4)
+    with cols[0]: kpi("Total Net Revenue", money(net), f"{delta_net:+.1f}% vs previous period" if pd.notna(delta_net) else "No prior-period baseline")
+    with cols[1]: kpi("Total Net Profit", money(profit), f"Margin {margin:.1f}%", True)
+    with cols[2]: kpi("Profit Margin", pct(margin), "Net profit ÷ net revenue")
+    with cols[3]: kpi("Total Orders", f"{orders:,}", f"{sales['customer_id'].nunique():,} unique customers", True)
 
-    with cols[0]:
-        kpi(
-            "Total Net Revenue",
-            money(net),
-            f"{delta_net:+.1f}% vs previous period"
-            if pd.notna(delta_net) else "No prior-period baseline"
-        )
-
-    with cols[1]:
-        kpi("Total Net Profit", money(profit), f"Margin {margin:.1f}%", True)
-
-    with cols[2]:
-        kpi("Profit Margin", pct(margin), "Net profit ÷ net revenue")
-
-    with cols[3]:
-        kpi(
-            "Total Orders",
-            f"{orders:,}",
-            f"{sales['customer_id'].nunique():,} unique customers",
-            True
-        )
-
-    # -----------------------------------------------------------------
-    # Monthly Revenue Composition — Stacked Column Chart
-    # -----------------------------------------------------------------
-    monthly = sales.groupby("month", as_index=False).agg(
-        net_revenue=("net_revenue", "sum"),
-        total_cost=("total_cost", "sum"),
-        net_profit=("net_profit", "sum"),
-        gross_revenue=("gross_revenue", "sum")
-    )
-
-    # Profit margin calculation
-    monthly["margin_pct"] = np.where(
-        monthly["net_revenue"] != 0,
-        monthly["net_profit"] / monthly["net_revenue"] * 100,
-        0
-    )
-
-    # Short revenue labels for the top of each column
-    def compact_money(value):
-        if abs(value) >= 1_000_000:
-            return f"${value / 1_000_000:.1f}M"
-        elif abs(value) >= 1_000:
-            return f"${value / 1_000:.0f}K"
-        return f"${value:,.0f}"
-
-    revenue_labels = monthly["net_revenue"].apply(compact_money)
-    margin_labels = monthly["margin_pct"].apply(lambda x: f"{x:.1f}%")
-
-    # Create figure
-    fig = go.Figure()
-
-    # Bottom section: Total Cost
-    fig.add_trace(
-        go.Bar(
-            x=monthly["month"],
-            y=monthly["total_cost"],
-            name="Total Cost",
-            marker=dict(
-                color=INDIGO,
-                line=dict(color=INDIGO, width=0)
-            ),
-            hovertemplate=(
-                "<b>%{x|%b %Y}</b><br>"
-                "Total Cost: $%{y:,.2f}"
-                "<extra></extra>"
-            )
-        )
-    )
-
-    # Top section: Net Profit
-    fig.add_trace(
-        go.Bar(
-            x=monthly["month"],
-            y=monthly["net_profit"],
-            name="Net Profit",
-            marker=dict(
-                color=AMBER,
-                line=dict(color=AMBER, width=0)
-            ),
-            text=margin_labels,
-            textposition="inside",
-            insidetextanchor="middle",
-            textfont=dict(
-                family="Inter",
-                size=12,
-                color="#FFFFFF"
-            ),
-            hovertemplate=(
-                "<b>%{x|%b %Y}</b><br>"
-                "Net Profit: $%{y:,.2f}"
-                "<extra></extra>"
-            )
-        )
-    )
-
-    # Revenue labels above each complete stacked column
-    fig.add_trace(
-        go.Scatter(
-            x=monthly["month"],
-            y=monthly["net_revenue"],
-            mode="text",
-            text=revenue_labels,
-            textposition="top center",
-            textfont=dict(
-                family="Inter",
-                size=11,
-                color=INK
-            ),
-            name="Net Revenue",
-            showlegend=False,
-            hovertemplate=(
-                "<b>%{x|%b %Y}</b><br>"
-                "Net Revenue: $%{y:,.2f}"
-                "<extra></extra>"
-            )
-        )
-    )
-
-    # Chart layout
-    max_revenue = monthly["net_revenue"].max()
-
-    fig.update_layout(
-        barmode="stack",
-        bargap=0.35,
-        height=380,
-        margin=dict(l=12, r=12, t=55, b=12),
-        yaxis=dict(
-            title="Amount ($)",
-            tickprefix="$",
-            separatethousands=True,
-            rangemode="tozero",
-            range=[0, max_revenue * 1.18] if max_revenue > 0 else [0, 1]
-        ),
-        xaxis=dict(
-            title="",
-            tickformat="%b %Y",
-            type="date"
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.08,
-            xanchor="left",
-            x=0
-        ),
-        hovermode="x unified"
-    )
-
-    st.markdown(
-        '<div class="section-head">Monthly Revenue Composition & Profitability</div>',
-        unsafe_allow_html=True
-    )
-
+    monthly = sales.groupby("month", as_index=False).agg(net_revenue=("net_revenue", "sum"), net_profit=("net_profit", "sum"), gross_revenue=("gross_revenue", "sum"))
+    monthly["margin_pct"] = np.where(monthly["net_revenue"] != 0, monthly["net_profit"] / monthly["net_revenue"] * 100, 0)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(x=monthly["month"], y=monthly["net_revenue"], name="Net Revenue", marker_color=INDIGO, opacity=.9), secondary_y=False)
+    fig.add_trace(go.Scatter(x=monthly["month"], y=monthly["net_profit"], name="Net Profit", mode="lines+markers", line=dict(color=AMBER, width=3), marker=dict(size=6)), secondary_y=True)
+    fig.add_trace(go.Scatter(x=monthly["month"], y=monthly["margin_pct"], name="Profit Margin %", mode="lines", line=dict(color="#3B82F6", width=2, dash="dot")), secondary_y=True)
+    fig.update_yaxes(title_text="Net Revenue", secondary_y=False)
+    fig.update_yaxes(title_text="Profit / Margin", secondary_y=True)
+    st.markdown('<div class="section-head">Monthly Revenue & Profitability</div>', unsafe_allow_html=True)
     show_chart(fig, "exec_monthly")
 
-    # -----------------------------------------------------------------
-    # Lower Analytics — Original Charts Preserved
-    # -----------------------------------------------------------------
     left, right = st.columns(2)
-
-    # Top 10 Products by Net Profit
-    prod = (
-        sales.groupby("product_name", as_index=False)["net_profit"]
-        .sum()
-        .nlargest(10, "net_profit")
-        .sort_values("net_profit")
-    )
-
-    f1 = px.bar(
-        prod,
-        x="net_profit",
-        y="product_name",
-        orientation="h",
-        title="Top 10 Products · Net Profit",
-        labels={
-            "net_profit": "Net Profit",
-            "product_name": ""
-        },
-        color_discrete_sequence=[INDIGO]
-    )
-
+    prod = sales.groupby("product_name", as_index=False)["net_profit"].sum().nlargest(10, "net_profit").sort_values("net_profit")
+    f1 = px.bar(prod, x="net_profit", y="product_name", orientation="h", title="Top 10 Products · Net Profit", labels={"net_profit": "Net Profit", "product_name": ""}, color_discrete_sequence=[INDIGO])
     with left:
         show_chart(f1, "top_products")
-
-    # Top Stores by Profit Margin
-    store = sales.groupby("store_name", as_index=False).agg(
-        net_revenue=("net_revenue", "sum"),
-        total_cost=("total_cost", "sum")
-    )
-
+    store = sales.groupby(["store_name"], as_index=False).agg(net_revenue=("net_revenue", "sum"), total_cost=("total_cost", "sum"))
     store["net_profit"] = store["net_revenue"] - store["total_cost"]
-
-    store["margin_pct"] = np.where(
-        store["net_revenue"] != 0,
-        store["net_profit"] / store["net_revenue"] * 100,
-        0
-    )
-
-    f2 = px.bar(
-        store.nlargest(10, "margin_pct").sort_values("margin_pct"),
-        x="margin_pct",
-        y="store_name",
-        orientation="h",
-        title="Top Stores · Profit Margin",
-        labels={
-            "margin_pct": "Margin %",
-            "store_name": ""
-        },
-        color_discrete_sequence=[AMBER]
-    )
-
+    store["margin_pct"] = np.where(store["net_revenue"] != 0, store["net_profit"] / store["net_revenue"] * 100, 0)
     with right:
+        f2 = px.bar(store.nlargest(10, "margin_pct").sort_values("margin_pct"), x="margin_pct", y="store_name", orientation="h", title="Top Stores · Profit Margin", labels={"margin_pct": "Margin %", "store_name": ""}, color_discrete_sequence=[AMBER])
         show_chart(f2, "top_stores")
-
-    # -----------------------------------------------------------------
-    # Executive Health Summary — Original Design Preserved
-    # -----------------------------------------------------------------
     total_rx = len(rx_filtered)
     rx_per_order = total_rx / orders if orders else 0
-
-    status = (
-        "Healthy operating performance"
-        if margin >= 20
-        else "Monitor profitability and discount pressure"
-        if margin >= 10
-        else "Profitability requires management attention"
-    )
-
+    status = "Healthy operating performance" if margin >= 20 else "Monitor profitability and discount pressure" if margin >= 10 else "Profitability requires management attention"
     st.markdown(f"""
-    <div class="panel">
-        <div class="section-head">Executive Health Summary</div>
-
-        <div style="font-size:19px;font-weight:800;color:{INDIGO}">
-            {status}
-        </div>
-
-        <p style="color:{MUTED};margin:7px 0 0">
-            The selected portfolio generated
-            <b>{money(net)}</b> in net revenue and
-            <b>{money(profit)}</b> in net profit at a
-            <b>{margin:.1f}%</b> margin.
-
-            There were <b>{total_rx:,}</b> prescriptions issued
-            in the selected period
-            ({rx_per_order:.2f} prescriptions per order
-            as a directional workload indicator).
-
-            Review store margin dispersion and discount leakage
-            before scaling promotional activity.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    <div class="panel"><div class="section-head">Executive Health Summary</div>
+    <div style="font-size:19px;font-weight:800;color:{INDIGO}">{status}</div>
+    <p style="color:{MUTED};margin:7px 0 0">The selected portfolio generated <b>{money(net)}</b> in net revenue and <b>{money(profit)}</b> in net profit at a <b>{margin:.1f}%</b> margin.
+    There were <b>{total_rx:,}</b> prescriptions issued in the selected period ({rx_per_order:.2f} prescriptions per order as a directional workload indicator).
+    Review store margin dispersion and discount leakage before scaling promotional activity.</p></div>""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------
 # Page 2 — Sales Analysis
@@ -820,6 +574,3 @@ elif page == "Customer Behavior Analysis":
 
 st.markdown("---")
 st.caption("Meridian Health · Digitera BI Suite · CSV-backed executive suite.")
-
-
-check if there is any errors?
