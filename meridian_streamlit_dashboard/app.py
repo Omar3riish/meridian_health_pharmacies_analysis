@@ -341,29 +341,152 @@ def load_database(database_url: str):
             frames[table] = pd.read_sql(text(f'SELECT * FROM "{table}"'), conn)
     return frames
 
+def _standardize_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize common CSV/SQL naming differences without changing source data."""
+    frame = frame.copy()
+    frame.columns = [str(c).strip().lower().replace(" ", "_").replace("-", "_") for c in frame.columns]
+    aliases = {
+        "expiry_date": ["expiration_date", "expire_date", "expiry", "expiration", "expiration_datetime"],
+        "last_restocked": ["last_restock_date", "restock_date", "last_restock", "restocked_at"],
+        "shelf_life_status": ["expiry_status", "expiration_status", "stock_status", "batch_status"],
+        "reorder_level": ["minimum_stock", "min_stock", "reorder_point", "minimum_quantity"],
+        "quantity": ["qty", "stock_quantity", "on_hand", "units"],
+        "unit_price": ["selling_price", "sale_price", "retail_price", "price"],
+        "cost_price": ["purchase_price", "unit_cost", "cost", "buying_price"],
+        "category_name": ["category", "product_category"],
+        "store_name": ["branch_name", "pharmacy_name", "store", "branch"],
+        "customer_segment": ["segment", "customer_tier", "loyalty_tier"],
+        "is_pharmacist": ["pharmacist", "is_licensed_pharmacist"],
+        "salary": ["monthly_salary", "wage", "payroll"],
+    }
+    for target, candidates in aliases.items():
+        if target not in frame.columns:
+            for candidate in candidates:
+                if candidate in frame.columns:
+                    frame = frame.rename(columns={candidate: target})
+                    break
+    return frame
+
+
+def _ensure_column(frame: pd.DataFrame, column: str, default):
+    if column not in frame.columns:
+        frame[column] = default
+    return frame
+
+
 def normalize_data(frames):
+    """Validate and normalize source tables; optional inventory attributes are derived safely."""
     required = set(TABLES)
     missing = required - set(frames)
     if missing:
         raise ValueError(f"Missing tables: {', '.join(sorted(missing))}")
-    d = {k:v.copy() for k,v in frames.items()}
-    for col in ["sale_date"]:
-        d["fact_sales"][col] = pd.to_datetime(d["fact_sales"][col], errors="coerce")
-    d["fact_stock_log"]["expiry_date"] = pd.to_datetime(d["fact_stock_log"]["expiry_date"], errors="coerce")
-    d["fact_stock_log"]["last_restocked"] = pd.to_datetime(d["fact_stock_log"]["last_restocked"], errors="coerce")
-    d["fact_prescriptions"]["issue_date"] = pd.to_datetime(d["fact_prescriptions"]["issue_date"], errors="coerce")
-    if "is_below_reorder_level" not in d["fact_stock_log"].columns:
-        if {"quantity", "reorder_level"}.issubset(d["fact_stock_log"].columns):
-            d["fact_stock_log"]["is_below_reorder_level"] = (
-                pd.to_numeric(d["fact_stock_log"]["quantity"], errors="coerce").fillna(0)
-                < pd.to_numeric(d["fact_stock_log"]["reorder_level"], errors="coerce").fillna(0)
-            )
-        else:
-            d["fact_stock_log"]["is_below_reorder_level"] = False
-    # Standardize null discounts and numeric measures.
-    d["fact_sales"]["discount_pct"] = pd.to_numeric(d["fact_sales"]["discount_pct"], errors="coerce").fillna(0)
-    for c in ["quantity","unit_price"]:
-        d["fact_sales"][c] = pd.to_numeric(d["fact_sales"][c], errors="coerce").fillna(0)
+
+    d = {name: _standardize_columns(frame) for name, frame in frames.items()}
+
+    # Fact sales: the columns below are required to calculate the dashboard KPIs.
+    sales = d["fact_sales"]
+    required_sales = ["sale_id", "sale_date", "store_id", "customer_id", "product_id", "quantity"]
+    missing_sales = [c for c in required_sales if c not in sales.columns]
+    if missing_sales:
+        raise ValueError("fact_sales.csv is missing required columns: " + ", ".join(missing_sales))
+    sales["sale_date"] = pd.to_datetime(sales["sale_date"], errors="coerce")
+    sales["quantity"] = pd.to_numeric(sales["quantity"], errors="coerce").fillna(0)
+    discount_source = sales["discount_pct"] if "discount_pct" in sales.columns else pd.Series(0.0, index=sales.index)
+    sales["discount_pct"] = pd.to_numeric(discount_source, errors="coerce").fillna(0).clip(0, 1)
+    sales["unit_price"] = pd.to_numeric(sales.get("unit_price", np.nan), errors="coerce")
+    sales["payment_method"] = sales.get("payment_method", pd.Series("Not recorded", index=sales.index)).fillna("Not recorded")
+
+    # Product dimension: provide safe defaults for descriptive/economic attributes.
+    products = d["dim_products"]
+    if "product_id" not in products.columns:
+        raise ValueError("dim_products.csv must contain product_id")
+    products = _ensure_column(products, "product_name", "Unnamed product")
+    products = _ensure_column(products, "category_id", 0)
+    products = _ensure_column(products, "unit_price", np.nan)
+    products = _ensure_column(products, "cost_price", 0.0)
+    products["unit_price"] = pd.to_numeric(products["unit_price"], errors="coerce")
+    products["cost_price"] = pd.to_numeric(products["cost_price"], errors="coerce").fillna(0)
+    d["dim_products"] = products
+
+    # If transaction-level price is absent, use the product's listed unit price.
+    if sales["unit_price"].isna().all():
+        price_lookup = products.set_index("product_id")["unit_price"]
+        sales["unit_price"] = sales["product_id"].map(price_lookup)
+    sales["unit_price"] = sales["unit_price"].fillna(0)
+
+    # Store, customer and category dimensions.
+    stores = d["dim_stores"]
+    if "store_id" not in stores.columns:
+        raise ValueError("dim_stores.csv must contain store_id")
+    for col, default in [("store_name", "Unnamed store"), ("city", "Not specified"), ("region", "Not specified")]:
+        stores = _ensure_column(stores, col, default)
+    d["dim_stores"] = stores
+
+    customers = d["dim_customers"]
+    if "customer_id" not in customers.columns:
+        raise ValueError("dim_customers.csv must contain customer_id")
+    customers = _ensure_column(customers, "customer_segment", "Others")
+    d["dim_customers"] = customers
+
+    categories = d["dim_categories"]
+    categories = _ensure_column(categories, "category_id", 0)
+    categories = _ensure_column(categories, "category_name", "Uncategorized")
+    d["dim_categories"] = categories
+
+    # Inventory: expiry and restock dates are optional in many stock schemas.
+    stock = d["fact_stock_log"]
+    for col in ["product_id", "store_id", "quantity"]:
+        if col not in stock.columns:
+            raise ValueError(f"fact_stock_log.csv must contain {col}")
+    stock["quantity"] = pd.to_numeric(stock["quantity"], errors="coerce").fillna(0)
+    expiry_source = stock["expiry_date"] if "expiry_date" in stock.columns else pd.Series(pd.NaT, index=stock.index)
+    restock_source = stock["last_restocked"] if "last_restocked" in stock.columns else pd.Series(pd.NaT, index=stock.index)
+    reorder_source = stock["reorder_level"] if "reorder_level" in stock.columns else pd.Series(0, index=stock.index)
+    stock["expiry_date"] = pd.to_datetime(expiry_source, errors="coerce")
+    stock["last_restocked"] = pd.to_datetime(restock_source, errors="coerce")
+    stock["reorder_level"] = pd.to_numeric(reorder_source, errors="coerce").fillna(0)
+
+    if "is_below_reorder_level" not in stock.columns:
+        stock["is_below_reorder_level"] = stock["quantity"] < stock["reorder_level"]
+    else:
+        stock["is_below_reorder_level"] = stock["is_below_reorder_level"].fillna(False).astype(bool)
+
+    if "shelf_life_status" not in stock.columns:
+        today = pd.Timestamp.today().normalize()
+        days_left = (stock["expiry_date"] - today).dt.days
+        stock["shelf_life_status"] = np.select(
+            [stock["expiry_date"].notna() & (days_left < 0),
+             stock["expiry_date"].notna() & (days_left <= 30),
+             stock["expiry_date"].notna() & (days_left <= 90)],
+            ["Expired", "Critical Danger", "Short Shelf Life"],
+            default="Not specified",
+        )
+    stock = _ensure_column(stock, "batch_number", "Not recorded")
+    stock = _ensure_column(stock, "condition_notes", "")
+    d["fact_stock_log"] = stock
+
+    # Prescription dates are required by the prescription trend charts; other fields
+    # used in joins are checked/created to avoid KeyError on lean source exports.
+    rx = d["fact_prescriptions"]
+    if "issue_date" not in rx.columns:
+        raise ValueError("fact_prescriptions.csv must contain issue_date")
+    rx["issue_date"] = pd.to_datetime(rx["issue_date"], errors="coerce")
+    for col, default in [("store_id", np.nan), ("product_id", np.nan), ("customer_id", np.nan)]:
+        rx = _ensure_column(rx, col, default)
+    d["fact_prescriptions"] = rx
+
+    # Employee attributes power the store workload section. If absent, use neutral
+    # defaults so the sales and inventory sections remain usable.
+    employees = d["dim_employees"]
+    employees = _ensure_column(employees, "store_id", np.nan)
+    employees = _ensure_column(employees, "is_pharmacist", False)
+    employees = _ensure_column(employees, "salary", 0.0)
+    employees["is_pharmacist"] = employees["is_pharmacist"].fillna(False).astype(int)
+    employees["salary"] = pd.to_numeric(employees["salary"], errors="coerce").fillna(0)
+    d["dim_employees"] = employees
+
+    # Suppliers are retained as part of the star schema, even if not displayed.
+    d["dim_suppliers"] = _ensure_column(d["dim_suppliers"], "supplier_name", "Unspecified supplier")
     return d
 
 def enrich(frames):
