@@ -1146,46 +1146,225 @@ elif page == "Product & Inventory Analysis":
     st.markdown('<div class="section-head">Stock Conditions & Reorder Alerts</div>',unsafe_allow_html=True)
     only_alerts=st.checkbox("Show below-reorder batches only",value=True)
     alerts=stock[stock["is_below_reorder_level"]] if only_alerts else stock
-    show_cols=[c for c in ["batch_number","product_name","store_name","quantity","reorder_level","is_below_reorder_level","expiry_date","shelf_life_status","condition_notes","supplier_id"] if c in alerts.columns]
-    st.dataframe(alerts[show_cols].sort_values(["is_below_reorder_level","expiry_date"],ascending=[False,True]),use_container_width=True,hide_index=True)
-    st.markdown('<div class="section-head">Product Profitability vs Inventory Efficiency</div>',unsafe_allow_html=True)
-    st.caption("Turnover proxy = units sold over the available dataset ÷ current on-hand units. This is directional, not a time-normalized accounting turnover ratio.")
-    show_chart(px.scatter(profitability,x="turnover_proxy",y="margin_pct",size="net_revenue",color="margin_pct",hover_name="product_name",labels={"turnover_proxy":"Units sold / current stock","margin_pct":"Profit margin %"},color_continuous_scale=["#F59E0B",INDIGO],size_max=40),"inventory_matrix")
+    show_cols = [
+        col for col in [
+            "batch_number", "product_name", "store_name", "quantity",
+            "reorder_level", "is_below_reorder_level", "expiry_date",
+            "shelf_life_status", "condition_notes", "supplier_id",
+        ]
+        if col in alerts.columns
+    ]
+
+    # Build and sort the alert table using only fields present in this schema.
+    alert_table = alerts[show_cols].copy()
+    sort_cols = [
+        col for col in ["is_below_reorder_level", "expiry_date"]
+        if col in alert_table.columns
+    ]
+    if sort_cols:
+        ascending_order = [
+            False if col == "is_below_reorder_level" else True
+            for col in sort_cols
+        ]
+        alert_table = alert_table.sort_values(
+            by=sort_cols,
+            ascending=ascending_order,
+            na_position="last",
+        )
+
+    st.dataframe(
+        alert_table,
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.markdown(
+        '<div class="section-head">Product Profitability vs Inventory Efficiency</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Turnover proxy = units sold over the available dataset ÷ current on-hand units. "
+        "This is directional, not a time-normalized accounting turnover ratio."
+    )
+    show_chart(
+        px.scatter(
+            profitability,
+            x="turnover_proxy",
+            y="margin_pct",
+            size="net_revenue",
+            color="margin_pct",
+            hover_name="product_name",
+            labels={
+                "turnover_proxy": "Units sold / current stock",
+                "margin_pct": "Profit margin %",
+            },
+            color_continuous_scale=["#F59E0B", INDIGO],
+            size_max=40,
+        ),
+        "inventory_matrix",
+    )
 
 # ---------------------------------------------------------------------
 # Page 5 — Store & Geographic Analysis
 # ---------------------------------------------------------------------
 elif page == "Store & Geographic Analysis":
     page_heading("Network performance","Store & Geographic Analysis","Compare store economics, geographic contribution and pharmacy operating workload.")
-    store=sales.groupby(["store_id","store_name","city","region"],as_index=False).agg(gross_revenue=("gross_revenue","sum"),net_revenue=("net_revenue","sum"),total_cost=("total_cost","sum"),net_profit=("net_profit","sum"),customers=("customer_id","nunique"))
-    store["profit_margin_pct"]=np.where(store["net_revenue"]!=0,store["net_profit"]/store["net_revenue"]*100,0)
-    rx_store=rx_filtered.groupby("store_id").size().rename("total_prescriptions")
-    store=store.merge(rx_store,on="store_id",how="left").fillna({"total_prescriptions":0})
-    emp=raw["dim_employees"].groupby("store_id").agg(pharmacist_count=("is_pharmacist","sum"),total_payroll=("salary","sum")).reset_index()
-    store=store.merge(emp,on="store_id",how="left")
-    store["prescriptions_per_pharmacist"]=store["total_prescriptions"]/store["pharmacist_count"].replace(0,np.nan)
-    store["labor_cost_per_prescription"]=store["total_payroll"]/store["total_prescriptions"].replace(0,np.nan)
+    # ---------------------------------------------------------
+    # Store performance: use one consistent key type for all joins.
+    # _normalize_id preserves text IDs while standardizing values such
+    # as 12, 12.0, and "12" so pandas can safely match them.
+    # ---------------------------------------------------------
+    store = sales.groupby(
+        ["store_id", "store_name", "city", "region"],
+        as_index=False,
+    ).agg(
+        gross_revenue=("gross_revenue", "sum"),
+        net_revenue=("net_revenue", "sum"),
+        total_cost=("total_cost", "sum"),
+        net_profit=("net_profit", "sum"),
+        customers=("customer_id", "nunique"),
+    )
+    store["store_id"] = _normalize_id(store["store_id"])
+    store["profit_margin_pct"] = np.where(
+        store["net_revenue"] != 0,
+        store["net_profit"] / store["net_revenue"] * 100,
+        0,
+    )
+
+    # Aggregate prescriptions after normalizing their store key.
+    rx_store_data = rx_filtered[["store_id"]].copy()
+    rx_store_data["store_id"] = _normalize_id(rx_store_data["store_id"])
+    rx_store = (
+        rx_store_data.groupby("store_id")
+        .size()
+        .rename("total_prescriptions")
+        .reset_index()
+    )
+    store = store.merge(rx_store, on="store_id", how="left")
+    store["total_prescriptions"] = store["total_prescriptions"].fillna(0)
+
+    # Aggregate employee metrics at store level, using the same key format.
+    emp_data = raw["dim_employees"].copy()
+    emp_data["store_id"] = _normalize_id(emp_data["store_id"])
+    emp = (
+        emp_data.groupby("store_id")
+        .agg(
+            pharmacist_count=("is_pharmacist", "sum"),
+            total_payroll=("salary", "sum"),
+        )
+        .reset_index()
+    )
+    store = store.merge(emp, on="store_id", how="left")
+
+    store["prescriptions_per_pharmacist"] = (
+        store["total_prescriptions"]
+        / store["pharmacist_count"].replace(0, np.nan)
+    )
+    store["labor_cost_per_prescription"] = (
+        store["total_payroll"]
+        / store["total_prescriptions"].replace(0, np.nan)
+    )
     c1,c2=st.columns(2)
     with c1:
         st.markdown('<div class="section-head">Geographic Revenue & Profit</div>',unsafe_allow_html=True)
         city=store.groupby(["region","city"],as_index=False).agg(net_revenue=("net_revenue","sum"),net_profit=("net_profit","sum"))
-        city_coords={"Cairo":(30.0444,31.2357),"New Cairo":(30.0074,31.4913),
-                     "Giza":(29.9870,31.2118),"6th of October":(29.9285,30.9188),
-                     "Alexandria":(31.2001,29.9187),"Tanta":(30.7865,31.0004),
-                     "Aswan":(24.0889,32.8998),"Luxor":(25.6872,32.6396),
-                     "Ismailia":(30.5965,32.2715),"Suez":(29.9668,32.5498)}
-        city["lat"]=city["city"].map(lambda x: city_coords.get(x,(np.nan,np.nan))[0])
-        city["lon"]=city["city"].map(lambda x: city_coords.get(x,(np.nan,np.nan))[1])
+        # Coordinates are keyed by normalized city names. The current
+        # dim_stores.csv contains Canadian cities, so include those locations
+        # as well as the Egyptian cities supported by the original dashboard.
+        city_coords={
+            # Canada
+            "Toronto":(43.6532,-79.3832),
+            "Vancouver":(49.2827,-123.1207),
+            "Calgary":(51.0447,-114.0719),
+            "Montreal":(45.5019,-73.5674),
+            "Ottawa":(45.4215,-75.6972),
+            "Edmonton":(53.5461,-113.4938),
+            "Quebec City":(46.8139,-71.2080),
+            "Halifax":(44.6488,-63.5752),
+            "Winnipeg":(49.8951,-97.1384),
+            "Regina":(50.4452,-104.6189),
+            "Waterloo":(43.4643,-80.5204),
+            "Moncton":(46.0878,-64.7782),
+            # Egypt
+            "Cairo":(30.0444,31.2357),
+            "New Cairo":(30.0074,31.4913),
+            "Giza":(29.9870,31.2118),
+            "6th of October":(29.9285,30.9188),
+            "Alexandria":(31.2001,29.9187),
+            "Tanta":(30.7865,31.0004),
+            "Aswan":(24.0889,32.8998),
+            "Luxor":(25.6872,32.6396),
+            "Ismailia":(30.5965,32.2715),
+            "Suez":(29.9668,32.5498),
+        }
+        city["city_key"]=city["city"].astype(str).str.strip().str.casefold()
+        normalized_city_coords={name.casefold():coords for name,coords in city_coords.items()}
+        city["lat"]=city["city_key"].map(lambda name: normalized_city_coords.get(name,(np.nan,np.nan))[0])
+        city["lon"]=city["city_key"].map(lambda name: normalized_city_coords.get(name,(np.nan,np.nan))[1])
         mapped=city.dropna(subset=["lat","lon"])
         if not mapped.empty:
-            geo=px.scatter_mapbox(mapped,lat="lat",lon="lon",size="net_revenue",color="region",hover_name="city",
-                                  hover_data={"net_revenue":":,.0f","net_profit":":,.0f","lat":False,"lon":False},
-                                  size_max=35,zoom=4,mapbox_style="open-street-map")
-            geo.update_layout(height=380,margin=dict(l=0,r=0,t=10,b=0),paper_bgcolor="rgba(0,0,0,0)",
-                              font=dict(family="Inter",color=INK,size=11),legend=dict(orientation="h",y=1.02))
-            st.plotly_chart(geo,use_container_width=True,config={"displaylogo":False},key="store_geo_map")
+            # Use Scattergeo instead of Plotly Express scatter_mapbox.
+            # This avoids dependency on scatter_mapbox/scatter_map APIs and
+            # does not require a Mapbox token.
+            geo = go.Figure()
+            region_colors = {
+                region_name: PALETTE[i % len(PALETTE)]
+                for i, region_name in enumerate(sorted(mapped["region"].dropna().astype(str).unique()))
+            }
+            revenue_values = pd.to_numeric(mapped["net_revenue"], errors="coerce").fillna(0).clip(lower=0)
+            max_revenue = float(revenue_values.max()) if not revenue_values.empty else 0.0
+            if max_revenue > 0:
+                marker_sizes = 12 + 28 * np.sqrt(revenue_values / max_revenue)
+            else:
+                marker_sizes = pd.Series(16, index=mapped.index)
+            mapped = mapped.copy()
+            mapped["_marker_size"] = marker_sizes
+
+            for region_name, region_data in mapped.groupby("region", dropna=False):
+                region_label = str(region_name) if pd.notna(region_name) else "Unknown"
+                geo.add_trace(go.Scattergeo(
+                    lon=region_data["lon"],
+                    lat=region_data["lat"],
+                    text=region_data["city"].astype(str),
+                    mode="markers",
+                    name=region_label,
+                    marker=dict(
+                        size=region_data["_marker_size"],
+                        color=region_colors.get(region_label, MUTED),
+                        opacity=0.82,
+                        line=dict(width=1, color="#FFFFFF"),
+                    ),
+                    customdata=region_data[["net_revenue", "net_profit"]].to_numpy(),
+                    hovertemplate=(
+                        "<b>%{text}</b><br>Region: " + region_label
+                        + "<br>Net revenue: $%{customdata[0]:,.0f}"
+                        + "<br>Net profit: $%{customdata[1]:,.0f}<extra></extra>"
+                    ),
+                ))
+
+            geo.update_layout(
+                height=380,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Inter", color=INK, size=11),
+                legend=dict(orientation="h", y=1.02),
+                geo=dict(
+                    scope="north america" if mapped["lon"].between(-170, -50).all() else "world",
+                    projection_type="natural earth",
+                    showland=True,
+                    landcolor="#F1F3F6",
+                    showocean=True,
+                    oceancolor="#EAF2FA",
+                    showcountries=True,
+                    countrycolor="#FFFFFF",
+                    showcoastlines=True,
+                    coastlinecolor="#CBD5E1",
+                    lataxis=dict(showgrid=True, gridcolor="#FFFFFF"),
+                    lonaxis=dict(showgrid=True, gridcolor="#FFFFFF"),
+                ),
+            )
+            st.plotly_chart(geo, use_container_width=True, config={"displaylogo": False}, key="store_geo_map")
         else:
-            st.info("No recognized city coordinates are available. Add latitude/longitude columns to dim_stores to enable the map.")
+            st.info("No coordinates matched the city names in dim_stores. Add those cities to the city-coordinate mapping in the Store & Geographic Analysis section.")
     with c2:
         st.markdown('<div class="section-head">Region → City → Store</div>',unsafe_allow_html=True)
         tree=store.groupby(["region","city","store_name"],as_index=False)["net_revenue"].sum()
