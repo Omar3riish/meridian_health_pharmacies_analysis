@@ -431,11 +431,17 @@ def _build_date_from_parts_named(df: pd.DataFrame, prefix: str) -> pd.Series:
         return pd.Series(pd.NaT, index=df.index)
     month_map = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
                  "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
-    m_num = m.map(lambda v: month_map.get(v.strip().lower(), np.nan) if isinstance(v, str) else v)
+    m_num = m.map(
+        lambda v: month_map.get(v.strip().lower(), np.nan)
+        if isinstance(v, str) and not v.strip().isdigit()
+        else v
+    )
     return pd.to_datetime(
-        dict(year=pd.to_numeric(y, errors="coerce"),
-             month=m_num,
-             day=pd.to_numeric(d, errors="coerce")),
+        {
+            "year": pd.to_numeric(y, errors="coerce"),
+            "month": pd.to_numeric(m_num, errors="coerce"),
+            "day": pd.to_numeric(d, errors="coerce"),
+        },
         errors="coerce",
     )
 
@@ -556,7 +562,7 @@ def normalize_data(frames):
             ["Expired", "Critical Danger", "Short Shelf Life"],
             default="Not specified",
         )
-    stock["shelf_life_status"] = stock["shelf_life_status"].astype(str).fillna("Not specified")
+    stock["shelf_life_status"] = stock["shelf_life_status"].fillna("Not specified").astype(str)
     stock = _ensure_column(stock, "batch_number", "Not recorded")
     stock = _ensure_column(stock, "condition_notes", "")
     d["fact_stock_log"] = stock
@@ -689,7 +695,13 @@ store_filter = st.sidebar.selectbox("Store", store_options)
 category_options = ["All"] + sorted(sales_all["category_name"].dropna().unique().tolist())
 category_filter = st.sidebar.selectbox("Product category", category_options)
 
-sales = sales_all[sales_all["sale_date"].dt.date.between(start_date, end_date)].copy()
+sales_start = pd.Timestamp(start_date)
+sales_end_exclusive = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+sales = sales_all.loc[
+    sales_all["sale_date"].notna()
+    & sales_all["sale_date"].ge(sales_start)
+    & sales_all["sale_date"].lt(sales_end_exclusive)
+].copy()
 if region_filter != "All":
     sales = sales[sales["region"] == region_filter]
 if store_filter != "All":
@@ -710,7 +722,12 @@ orders = sales["sale_id"].nunique()
 period_days = max((end_date - start_date).days + 1, 1)
 prev_start = pd.Timestamp(start_date) - pd.Timedelta(days=period_days)
 prev_end = pd.Timestamp(start_date) - pd.Timedelta(days=1)
-prev = sales_all[sales_all["sale_date"].dt.date.between(prev_start.date(), prev_end.date())].copy()
+prev_end_exclusive = pd.Timestamp(start_date)
+prev = sales_all.loc[
+    sales_all["sale_date"].notna()
+    & sales_all["sale_date"].ge(prev_start)
+    & sales_all["sale_date"].lt(prev_end_exclusive)
+].copy()
 if region_filter != "All":
     prev = prev[prev["region"] == region_filter]
 if store_filter != "All":
@@ -720,21 +737,74 @@ if category_filter != "All":
 prev_net = prev["net_revenue"].sum()
 delta_net = (net - prev_net) / prev_net * 100 if prev_net else np.nan
 
+# ---------------------------------------------------------------------
+# Prescription filtering
+# Prescriptions follow ALL four global slicers: date, region, store, category.
+# Category is mapped through prescription.product_id -> dim_products -> dim_categories.
+# ---------------------------------------------------------------------
 rx = raw["fact_prescriptions"].copy()
-rx["issue_date"] = pd.to_datetime(rx.get("issue_date"), errors="coerce")
-rx = rx.merge(raw["dim_stores"][["store_id", "store_name", "region"]], on="store_id", how="left")
-rx = rx.merge(raw["dim_products"][["product_id", "category_id"]], on="product_id", how="left")
-rx = rx.merge(raw["dim_categories"], on="category_id", how="left")
+store_dim = raw["dim_stores"][["store_id", "store_name", "region"]].copy()
+product_dim = raw["dim_products"][["product_id", "category_id"]].copy()
+category_dim = raw["dim_categories"][["category_id", "category_name"]].copy()
 
-rx_dates = rx["issue_date"].dt.date
-rx_mask = rx_dates.between(start_date, end_date) & rx_dates.notna()
-rx_filtered = rx[rx_mask].copy()
+# Normalize numeric-looking and text IDs consistently (e.g. 12, 12.0, "12").
+def _normalize_id(series: pd.Series) -> pd.Series:
+    values = series.astype("string").str.strip()
+    numeric = pd.to_numeric(values, errors="coerce")
+    numeric_mask = numeric.notna()
+    values.loc[numeric_mask] = numeric.loc[numeric_mask].map(
+        lambda value: str(int(value)) if float(value).is_integer() else str(value)
+    )
+    return values
+
+for frame, key in [
+    (rx, "store_id"), (store_dim, "store_id"),
+    (rx, "product_id"), (product_dim, "product_id"),
+    (product_dim, "category_id"), (category_dim, "category_id"),
+]:
+    if key in frame.columns:
+        frame[key] = _normalize_id(frame[key])
+
+# Keep dimension keys unique so joins cannot multiply prescription rows.
+store_dim = store_dim.dropna(subset=["store_id"]).drop_duplicates("store_id", keep="first")
+product_dim = product_dim.dropna(subset=["product_id"]).drop_duplicates("product_id", keep="first")
+category_dim = category_dim.dropna(subset=["category_id"]).drop_duplicates("category_id", keep="first")
+
+# Remove any pre-existing category_id so the product dimension is the single
+# authoritative mapping from the prescribed product to its category.
+if "category_id" in rx.columns:
+    rx = rx.drop(columns=["category_id"])
+
+rx["issue_date"] = pd.to_datetime(rx["issue_date"], errors="coerce")
+rx = rx.merge(store_dim, on="store_id", how="left", validate="many_to_one")
+rx = rx.merge(product_dim, on="product_id", how="left", validate="many_to_one")
+rx = rx.merge(category_dim, on="category_id", how="left", validate="many_to_one")
+
+# Date filter includes the complete selected end date.
+rx_start = pd.Timestamp(start_date)
+rx_end_exclusive = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+rx_mask = (
+    rx["issue_date"].notna()
+    & rx["issue_date"].ge(rx_start)
+    & rx["issue_date"].lt(rx_end_exclusive)
+)
+rx_filtered = rx.loc[rx_mask].copy()
+
 if region_filter != "All":
-    rx_filtered = rx_filtered[rx_filtered["region"] == region_filter]
+    rx_filtered = rx_filtered.loc[rx_filtered["region"].eq(region_filter)].copy()
+
 if store_filter != "All":
-    rx_filtered = rx_filtered[rx_filtered["store_name"] == store_filter]
+    rx_filtered = rx_filtered.loc[rx_filtered["store_name"].eq(store_filter)].copy()
+
+# Apply the same product-category selection used by the sales denominator.
 if category_filter != "All":
-    rx_filtered = rx_filtered[rx_filtered["category_name"] == category_filter]
+    rx_filtered = rx_filtered.loc[
+        rx_filtered["category_name"].eq(category_filter)
+    ].copy()
+
+# The numerator and denominator now describe the same selected portfolio.
+total_rx = len(rx_filtered)
+rx_per_order = total_rx / orders if orders else 0
 
 pages = [
     "Executive Overview", "Sales Analysis", "Customer Analysis",
@@ -872,16 +942,17 @@ if page == "Executive Overview":
         show_chart(f2, "top_stores")
 
     # 4. Executive Health Summary
-    total_rx=len(rx_filtered)
-    rx_per_order=total_rx/orders if orders else 0
     status="Healthy operating performance" if margin>=20 else "Monitor profitability and discount pressure" if margin>=10 else "Profitability requires management attention"
     
     st.markdown(f"""
     <div class="panel"><div class="section-head">Executive Health Summary</div>
     <div style="font-size:19px;font-weight:800;color:{INDIGO}">{status}</div>
     <p style="color:{MUTED};margin:7px 0 0">The selected portfolio generated <b>{money(net)}</b> in net revenue and <b>{money(profit)}</b> in net profit at a <b>{margin:.1f}%</b> margin.
-    There were <b>{total_rx:,}</b> prescriptions issued in the selected period ({rx_per_order:.2f} prescriptions per order as a directional workload indicator).
+    There were <b>{total_rx:,}</b> prescriptions matching the selected date, region, store and product category ({rx_per_order:.2f} prescriptions per order as a directional workload indicator).
     Review store margin dispersion and discount leakage before scaling promotional activity.</p></div>""",unsafe_allow_html=True)
+
+
+    
 # ---------------------------------------------------------------------
 # Page 2 — Sales Analysis
 # ---------------------------------------------------------------------
@@ -889,13 +960,84 @@ elif page == "Sales Analysis":
     page_heading("Commercial performance","Sales Analysis","Understand sales momentum, discount leakage, payment mix and category-level economics.")
     gran=st.radio("Time granularity",["Monthly","Daily"],horizontal=True)
     sales["period"]=sales["month"] if gran=="Monthly" else sales["day"]
-    trend=sales.groupby("period",as_index=False).agg(gross_revenue=("gross_revenue","sum"),discount_leakage=("discount_value","sum"),net_revenue=("net_revenue","sum"))
+    # Gross revenue composition: Gross Revenue = Net Revenue + Discount Value.
+    # Stack the two components so the full bar represents gross revenue.
+    trend=sales.groupby("period",as_index=False).agg(
+        net_revenue=("net_revenue","sum"),
+        discount_value=("discount_value","sum"),
+    )
+    trend["gross_revenue"] = trend["net_revenue"] + trend["discount_value"]
+    trend["net_share_pct"] = np.where(
+        trend["gross_revenue"] != 0,
+        trend["net_revenue"] / trend["gross_revenue"] * 100,
+        0,
+    )
+    trend["discount_share_pct"] = np.where(
+        trend["gross_revenue"] != 0,
+        trend["discount_value"] / trend["gross_revenue"] * 100,
+        0,
+    )
+    trend["net_label"] = trend["net_share_pct"].map(lambda value: f"{value:.1f}%")
+    trend["discount_label"] = trend["discount_share_pct"].map(lambda value: f"{value:.1f}%")
+
     fig=go.Figure()
-    fig.add_bar(x=trend["period"],y=trend["gross_revenue"],name="Gross Revenue",marker_color=INDIGO)
-    fig.add_scatter(x=trend["period"],y=trend["discount_leakage"],name="Discount Leakage",mode="lines",line=dict(color=AMBER,width=2))
-    fig.add_scatter(x=trend["period"],y=trend["net_revenue"],name="Net Revenue",mode="lines+markers",line=dict(color="#3B82F6",width=2))
-    st.markdown('<div class="section-head">Sales Trend & Discount Leakage</div>',unsafe_allow_html=True)
-    show_chart(fig,"sales_trend")
+    fig.add_bar(
+        x=trend["period"], y=trend["net_revenue"], name="Net Revenue",
+        marker_color=INDIGO,
+        text=trend["net_label"], textposition="inside",
+        insidetextanchor="middle", constraintext="none",
+        insidetextfont=dict(color="#FFFFFF", size=12),
+        customdata=trend["gross_revenue"],
+        hovertemplate=(
+            "%{x|%b %Y}<br>Net Revenue: $%{y:,.0f}"
+            "<br>Share of Gross: %{text}"
+            "<br>Gross Revenue: $%{customdata:,.0f}<extra></extra>"
+        ),
+    )
+    fig.add_bar(
+        x=trend["period"], y=trend["discount_value"], name="Discount Value",
+        marker_color=AMBER,
+        text=trend["discount_label"], textposition="inside",
+        insidetextanchor="middle", constraintext="none",
+        insidetextfont=dict(color="#1E293B", size=12),
+        customdata=trend["gross_revenue"],
+        hovertemplate=(
+            "%{x|%b %Y}<br>Discount Value: $%{y:,.0f}"
+            "<br>Share of Gross: %{text}"
+            "<br>Gross Revenue: $%{customdata:,.0f}<extra></extra>"
+        ),
+    )
+
+    # Show gross revenue as the total above each stacked bar.
+    for _, row in trend.iterrows():
+        fig.add_annotation(
+            x=row["period"], y=row["gross_revenue"],
+            text=money(row["gross_revenue"]),
+            showarrow=False, yshift=12,
+            font=dict(color=INK, size=11),
+        )
+
+    max_gross = trend["gross_revenue"].max() if not trend.empty else 0
+    fig.update_layout(
+        barmode="stack",
+        bargap=0.28,
+        margin=dict(l=12, r=12, t=55, b=12),
+        yaxis_title="Amount ($)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
+    fig.update_yaxes(
+        rangemode="tozero",
+        range=[0, max_gross * 1.12 if max_gross > 0 else 1],
+        tickprefix="$", tickformat=",.0f",
+    )
+    fig.update_xaxes(
+        title_text="Month" if gran == "Monthly" else "Date",
+        tickformat="%b %Y" if gran == "Monthly" else "%d %b",
+    )
+
+    st.markdown('<div class="section-head">Gross Revenue Composition</div>',unsafe_allow_html=True)
+    st.caption("Each bar represents Gross Revenue = Net Revenue + Discount Value. Segment labels show each component's share of gross revenue.")
+    show_chart(fig,"sales_trend",height=380)
 
     c1,c2=st.columns(2)
     region_store=sales.groupby(["region","store_name"],as_index=False)["net_revenue"].sum()
