@@ -12,16 +12,13 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-# Optional PostgreSQL support. The app remains fully usable without it.
 try:
     from sqlalchemy import create_engine, text
 except Exception:
     create_engine = None
     text = None
 
-# ---------------------------------------------------------------------
-# Configuration and Digitera design system
-# ---------------------------------------------------------------------
+
 st.set_page_config(
     page_title="Meridian Health | Executive BI Suite",
     page_icon="✦",
@@ -88,7 +85,7 @@ def brand_header():
     st.markdown("""
     <div class="brand-banner">
       <div><span class="brand-spark">✦</span><span class="brand-name">Meridian Health | Executive BI Suite</span>
-      <div class="brand-sub">Powered by JMDR Digital Solutions · Business Intelligence &amp; Web Solutions</div></div>
+      <div class="brand-sub">Powered by Omar 3rish </div></div>
       <div style="text-align:right"><span class="status-pill">● ANALYTICS ONLINE</span><div class="brand-sub">DIGITERA DESIGN SYSTEM</div></div>
     </div>""", unsafe_allow_html=True)
 
@@ -107,7 +104,6 @@ def kpi(label, value, delta=None, accent=False):
     st.markdown(f'<div class="{cls}"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div>{d}</div>', unsafe_allow_html=True)
 
 def chart_theme(fig, height=None):
-    # Preserve chart-specific height/margins unless a caller explicitly overrides height.
     layout = dict(
         template="plotly_white",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -223,8 +219,6 @@ def synthetic_data(seed: int = 42) -> Dict[str, pd.DataFrame]:
         "dim_suppliers":dim_suppliers,
     }
 
-# All nine project tables are loaded. dim_suppliers is part of the data model
-# even though the current dashboard pages do not yet display supplier KPIs.
 TABLES = [
     "fact_sales", "fact_stock_log", "fact_prescriptions", "dim_products",
     "dim_stores", "dim_customers", "dim_categories", "dim_employees",
@@ -233,16 +227,26 @@ TABLES = [
 OPTIONAL_TABLES = []
 
 
-def find_csv_file(filename: str) -> Optional[Path]:
-    """Find a CSV reliably on Streamlit Cloud and local Windows/Linux runs.
+# ---------------------------------------------------------------------
+# fact_stock_log date-block resolver
+# ---------------------------------------------------------------------
+_STOCK_DATE_BLOCKS = {"": "batch", ".1": "stock", ".2": "reorder"}
 
-    Search order:
-      1. MERIDIAN_DATA_DIR environment variable, if configured
-      2. app directory and app/data
-      3. repository/project directory and project/data
-      4. current working directory and current working directory/data
-      5. recursive search under the app and project directories
-    """
+
+def _rename_stock_date_blocks(df: pd.DataFrame) -> pd.DataFrame:
+    """Map the three repeated Year/Quarter/Month/Day blocks to explicit names."""
+    df = df.copy()
+    rename_map = {}
+    for suffix, prefix in _STOCK_DATE_BLOCKS.items():
+        for part in ("Year", "Quarter", "Month", "Day"):
+            source = f"{part}{suffix}"
+            if source in df.columns:
+                rename_map[source] = f"{prefix}_{part.lower()}"
+    return df.rename(columns=rename_map)
+
+
+def find_csv_file(filename: str) -> Optional[Path]:
+    """Find a CSV reliably on Streamlit Cloud and local Windows/Linux runs."""
     app_dir = Path(__file__).resolve().parent
     project_dir = app_dir.parent
     working_dir = Path.cwd()
@@ -277,7 +281,6 @@ def find_csv_file(filename: str) -> Optional[Path]:
         if candidate.is_file():
             return candidate
 
-    # Covers common repository layouts such as /data/raw/filename.csv.
     for root in (app_dir, project_dir):
         if root.exists():
             try:
@@ -306,11 +309,16 @@ def load_csv_data() -> Dict[str, pd.DataFrame]:
             continue
 
         try:
-            frames[table] = pd.read_csv(file_path, encoding="utf-8-sig")
+            df = pd.read_csv(file_path, encoding="utf-8-sig")
         except Exception as exc:
             raise RuntimeError(
                 f"Could not read {filename} from {file_path}: {exc}"
             ) from exc
+
+        if table == "fact_stock_log":
+            df = _rename_stock_date_blocks(df)
+
+        frames[table] = df
 
     if missing_files:
         missing_list = "\n".join(f"• {name}" for name in missing_files)
@@ -338,21 +346,42 @@ def load_database(database_url: str):
     frames = {}
     with engine.connect() as conn:
         for table in TABLES:
-            frames[table] = pd.read_sql(text(f'SELECT * FROM "{table}"'), conn)
+            df = pd.read_sql(text(f'SELECT * FROM "{table}"'), conn)
+            if table == "fact_stock_log":
+                df = _rename_stock_date_blocks(df)
+            frames[table] = df
     return frames
+
 
 def _standardize_columns(frame: pd.DataFrame) -> pd.DataFrame:
     """Normalize common CSV/SQL naming differences without changing source data."""
     frame = frame.copy()
-    frame.columns = [str(c).strip().lower().replace(" ", "_").replace("-", "_") for c in frame.columns]
+    new_cols = []
+    seen = {}
+    for c in frame.columns:
+        base = str(c).strip().lower().replace(" ", "_").replace("-", "_")
+        if base in seen:
+            seen[base] += 1
+            new_cols.append(f"{base}.{seen[base]}")
+        else:
+            seen[base] = 0
+            new_cols.append(base)
+    frame.columns = new_cols
+
     aliases = {
         "product_id": ["productid", "item_id", "medicine_id", "drug_id"],
-        "store_id": ["storeid", "branch_id", "pharmacy_id", "location_id"],
-        "expiry_date": ["expiration_date", "expire_date", "expiry", "expiration", "expiration_datetime"],
-        "last_restocked": ["last_restock_date", "restock_date", "last_restock", "restocked_at"],
-        "shelf_life_status": ["expiry_status", "expiration_status", "stock_status", "batch_status"],
-        "reorder_level": ["minimum_stock", "min_stock", "reorder_point", "minimum_quantity"],
-        "quantity": ["qty", "stock_quantity", "on_hand", "units"],
+        "store_id": ["storeid", "branch_id", "pharmacy_id", "location_id",
+                     "sum_of_store_id"],
+        "stock_id": ["sum_of_stock_id"],
+        "expiry_date": ["expiration_date", "expire_date", "expiry", "expiration",
+                        "expiration_datetime"],
+        "last_restocked": ["last_restock_date", "restock_date", "last_restock",
+                           "restocked_at"],
+        "shelf_life_status": ["expiry_status", "expiration_status", "stock_status",
+                              "batch_status"],
+        "reorder_level": ["minimum_stock", "min_stock", "reorder_point",
+                          "minimum_quantity", "sum_of_reorder_level"],
+        "quantity": ["qty", "stock_quantity", "on_hand", "units", "sum_of_quantity"],
         "unit_price": ["selling_price", "sale_price", "retail_price", "price"],
         "cost_price": ["purchase_price", "unit_cost", "cost", "buying_price"],
         "category_name": ["category", "product_category"],
@@ -360,6 +389,7 @@ def _standardize_columns(frame: pd.DataFrame) -> pd.DataFrame:
         "customer_segment": ["segment", "customer_tier", "loyalty_tier"],
         "is_pharmacist": ["pharmacist", "is_licensed_pharmacist"],
         "salary": ["monthly_salary", "wage", "payroll"],
+        "brand": ["brand_name", "manufacturer", "make"],
     }
     for target, candidates in aliases.items():
         if target not in frame.columns:
@@ -374,6 +404,40 @@ def _ensure_column(frame: pd.DataFrame, column: str, default):
     if column not in frame.columns:
         frame[column] = default
     return frame
+
+
+def _coerce_bool_series(series: pd.Series) -> pd.Series:
+    """Parse a boolean column that may arrive as true/false strings, 1/0, or NaN."""
+    if series.dtype == bool:
+        return series.fillna(False).astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.fillna(0).astype(bool)
+    mapped = (
+        series.astype(str).str.strip().str.lower()
+        .map({"true": True, "1": True, "yes": True, "y": True,
+              "false": False, "0": False, "no": False, "n": False,
+              "": False, "nan": False, "none": False, "null": False})
+        .fillna(False)
+    )
+    return mapped.astype(bool)
+
+
+def _build_date_from_parts_named(df: pd.DataFrame, prefix: str) -> pd.Series:
+    """Reconstruct a date from <prefix>_year / <prefix>_month / <prefix>_day."""
+    y = df.get(f"{prefix}_year")
+    m = df.get(f"{prefix}_month")
+    d = df.get(f"{prefix}_day")
+    if y is None or m is None or d is None:
+        return pd.Series(pd.NaT, index=df.index)
+    month_map = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+                 "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
+    m_num = m.map(lambda v: month_map.get(v.strip().lower(), np.nan) if isinstance(v, str) else v)
+    return pd.to_datetime(
+        dict(year=pd.to_numeric(y, errors="coerce"),
+             month=m_num,
+             day=pd.to_numeric(d, errors="coerce")),
+        errors="coerce",
+    )
 
 
 def normalize_data(frames):
@@ -406,11 +470,11 @@ def normalize_data(frames):
     products = _ensure_column(products, "category_id", 0)
     products = _ensure_column(products, "unit_price", np.nan)
     products = _ensure_column(products, "cost_price", 0.0)
+    products = _ensure_column(products, "brand", "Unbranded")
     products["unit_price"] = pd.to_numeric(products["unit_price"], errors="coerce")
     products["cost_price"] = pd.to_numeric(products["cost_price"], errors="coerce").fillna(0)
     d["dim_products"] = products
 
-    # If transaction-level price is absent, use the product's listed unit price.
     if sales["unit_price"].isna().all():
         price_lookup = products.set_index("product_id")["unit_price"]
         sales["unit_price"] = sales["product_id"].map(price_lookup)
@@ -420,7 +484,8 @@ def normalize_data(frames):
     stores = d["dim_stores"]
     if "store_id" not in stores.columns:
         raise ValueError("dim_stores.csv must contain store_id")
-    for col, default in [("store_name", "Unnamed store"), ("city", "Not specified"), ("region", "Not specified")]:
+    for col, default in [("store_name", "Unnamed store"), ("city", "Not specified"),
+                         ("region", "Not specified")]:
         stores = _ensure_column(stores, col, default)
     d["dim_stores"] = stores
 
@@ -451,18 +516,35 @@ def normalize_data(frames):
         stock["quantity"] = 0
         stock["condition_notes"] = "Quantity missing in source CSV; treated as zero"
 
+    batch_date   = _build_date_from_parts_named(stock, "batch")
+    stock_date   = _build_date_from_parts_named(stock, "stock")
+    reorder_date = _build_date_from_parts_named(stock, "reorder")
+
+    if "expiry_date" in stock.columns:
+        stock["expiry_date"] = pd.to_datetime(stock["expiry_date"], errors="coerce")
+    else:
+        stock["expiry_date"] = batch_date
+    if "last_restocked" in stock.columns:
+        stock["last_restocked"] = pd.to_datetime(stock["last_restocked"], errors="coerce")
+    else:
+        stock["last_restocked"] = stock_date
+    if "reorder_date" not in stock.columns:
+        stock["reorder_date"] = reorder_date
+
+    raw_date_cols = [c for c in stock.columns
+                     if c.split("_", 1)[0] in {"batch", "stock", "reorder"}
+                     and c.split("_", 1)[-1] in {"year", "quarter", "month", "day"}]
+    if raw_date_cols:
+        stock = stock.drop(columns=raw_date_cols)
+
     stock["quantity"] = pd.to_numeric(stock["quantity"], errors="coerce").fillna(0)
-    expiry_source = stock["expiry_date"] if "expiry_date" in stock.columns else pd.Series(pd.NaT, index=stock.index)
-    restock_source = stock["last_restocked"] if "last_restocked" in stock.columns else pd.Series(pd.NaT, index=stock.index)
     reorder_source = stock["reorder_level"] if "reorder_level" in stock.columns else pd.Series(0, index=stock.index)
-    stock["expiry_date"] = pd.to_datetime(expiry_source, errors="coerce")
-    stock["last_restocked"] = pd.to_datetime(restock_source, errors="coerce")
     stock["reorder_level"] = pd.to_numeric(reorder_source, errors="coerce").fillna(0)
 
     if "is_below_reorder_level" not in stock.columns:
         stock["is_below_reorder_level"] = stock["quantity"] < stock["reorder_level"]
     else:
-        stock["is_below_reorder_level"] = stock["is_below_reorder_level"].fillna(False).astype(bool)
+        stock["is_below_reorder_level"] = _coerce_bool_series(stock["is_below_reorder_level"])
 
     if "shelf_life_status" not in stock.columns:
         today = pd.Timestamp.today().normalize()
@@ -474,12 +556,11 @@ def normalize_data(frames):
             ["Expired", "Critical Danger", "Short Shelf Life"],
             default="Not specified",
         )
+    stock["shelf_life_status"] = stock["shelf_life_status"].astype(str).fillna("Not specified")
     stock = _ensure_column(stock, "batch_number", "Not recorded")
     stock = _ensure_column(stock, "condition_notes", "")
     d["fact_stock_log"] = stock
 
-    # Prescription dates are required by the prescription trend charts; other fields
-    # used in joins are checked/created to avoid KeyError on lean source exports.
     rx = d["fact_prescriptions"]
     if "issue_date" not in rx.columns:
         raise ValueError("fact_prescriptions.csv must contain issue_date")
@@ -488,26 +569,28 @@ def normalize_data(frames):
         rx = _ensure_column(rx, col, default)
     d["fact_prescriptions"] = rx
 
-    # Employee attributes power the store workload section. If absent, use neutral
-    # defaults so the sales and inventory sections remain usable.
     employees = d["dim_employees"]
     employees = _ensure_column(employees, "store_id", np.nan)
     employees = _ensure_column(employees, "is_pharmacist", False)
     employees = _ensure_column(employees, "salary", 0.0)
-    employees["is_pharmacist"] = employees["is_pharmacist"].fillna(False).astype(int)
+    employees["is_pharmacist"] = _coerce_bool_series(employees["is_pharmacist"]).astype(int)
     employees["salary"] = pd.to_numeric(employees["salary"], errors="coerce").fillna(0)
     d["dim_employees"] = employees
 
-    # Suppliers are retained as part of the star schema, even if not displayed.
     d["dim_suppliers"] = _ensure_column(d["dim_suppliers"], "supplier_name", "Unspecified supplier")
     return d
 
+
 def enrich(frames):
     d = normalize_data(frames)
-    sales = d["fact_sales"].merge(d["dim_products"][["product_id","product_name","category_id","unit_price","cost_price"]].rename(columns={"unit_price":"product_list_price"}), on="product_id", how="left")
-    sales = sales.merge(d["dim_stores"][["store_id","store_name","city","region"]],on="store_id",how="left")
-    sales = sales.merge(d["dim_customers"][["customer_id","customer_segment"]],on="customer_id",how="left")
-    sales = sales.merge(d["dim_categories"],on="category_id",how="left")
+    sales = d["fact_sales"].merge(
+        d["dim_products"][["product_id","product_name","brand","category_id","unit_price","cost_price"]]
+        .rename(columns={"unit_price":"product_list_price"}),
+        on="product_id", how="left",
+    )
+    sales = sales.merge(d["dim_stores"][["store_id","store_name","city","region"]], on="store_id", how="left")
+    sales = sales.merge(d["dim_customers"][["customer_id","customer_segment"]], on="customer_id", how="left")
+    sales = sales.merge(d["dim_categories"], on="category_id", how="left")
     sales["gross_revenue"] = sales["quantity"] * sales["unit_price"]
     sales["net_revenue"] = sales["gross_revenue"] * (1-sales["discount_pct"].fillna(0))
     sales["total_cost"] = sales["quantity"] * sales["cost_price"].fillna(0)
@@ -524,6 +607,17 @@ brand_header()
 database_url = os.getenv("DATABASE_URL", "").strip()
 use_synthetic = os.getenv("USE_SYNTHETIC_DATA", "").strip().lower() in {"1", "true", "yes"}
 
+
+def _postprocess_stock_table(table: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee fact_stock_log carries the explicit batch_/stock_/reorder_ date
+    blocks regardless of source (CSV, SQL view, or synthetic)."""
+    if table != "fact_stock_log":
+        return df
+    if {"batch_year", "stock_year", "reorder_year"}.issubset(df.columns):
+        return df
+    return _rename_stock_date_blocks(df)
+
+
 if use_synthetic:
     raw = synthetic_data()
     source_label = "SYNTHETIC DEMO DATA"
@@ -532,7 +626,6 @@ elif database_url:
         raw = load_database(database_url)
         source_label = "POSTGRESQL · LIVE"
     except Exception as db_exc:
-        # If PostgreSQL is temporarily unavailable, try the repository CSVs.
         try:
             raw = load_csv_data()
             source_label = "CSV DATA · DATABASE FALLBACK"
@@ -556,49 +649,86 @@ else:
         )
         st.stop()
 
+raw["fact_stock_log"] = _postprocess_stock_table("fact_stock_log", raw["fact_stock_log"])
+
 raw, sales_all = enrich(raw)
 st.sidebar.markdown("## ✦ Meridian Controls")
 st.sidebar.markdown(f'<span class="status-pill">{source_label}</span>', unsafe_allow_html=True)
+
+if sales_all.empty or sales_all["sale_date"].dropna().empty:
+    st.error(
+        "No valid sale_date values were found in fact_sales. Check that "
+        "fact_sales.csv has a parsable sale_date column and at least one row."
+    )
+    st.stop()
+
 min_date = sales_all["sale_date"].min().date()
 max_date = sales_all["sale_date"].max().date()
-date_range = st.sidebar.date_input("Date range", value=(min_date,max_date), min_value=min_date, max_value=max_date)
-if isinstance(date_range, tuple) and len(date_range)==2:
+
+date_range = st.sidebar.date_input(
+    "Date range",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date,
+)
+if isinstance(date_range, tuple) and len(date_range) == 2:
     start_date, end_date = date_range
 else:
     start_date, end_date = min_date, max_date
+
 regions_available = ["All"] + sorted(sales_all["region"].dropna().unique().tolist())
 region_filter = st.sidebar.selectbox("Region", regions_available)
-store_options = ["All"] + sorted(sales_all.loc[sales_all["region"].eq(region_filter) if region_filter!="All" else slice(None),"store_name"].dropna().unique().tolist())
+
+if region_filter != "All":
+    store_scope = sales_all.loc[sales_all["region"].eq(region_filter), "store_name"]
+else:
+    store_scope = sales_all["store_name"]
+store_options = ["All"] + sorted(store_scope.dropna().unique().tolist())
 store_filter = st.sidebar.selectbox("Store", store_options)
+
 category_options = ["All"] + sorted(sales_all["category_name"].dropna().unique().tolist())
 category_filter = st.sidebar.selectbox("Product category", category_options)
 
-sales = sales_all[sales_all["sale_date"].dt.date.between(start_date,end_date)].copy()
-if region_filter!="All": sales = sales[sales["region"]==region_filter]
-if store_filter!="All": sales = sales[sales["store_name"]==store_filter]
-if category_filter!="All": sales = sales[sales["category_name"]==category_filter]
+sales = sales_all[sales_all["sale_date"].dt.date.between(start_date, end_date)].copy()
+if region_filter != "All":
+    sales = sales[sales["region"] == region_filter]
+if store_filter != "All":
+    sales = sales[sales["store_name"] == store_filter]
+if category_filter != "All":
+    sales = sales[sales["category_name"] == category_filter]
 if sales.empty:
     st.warning("No sales match the selected filters. Widen the date range or clear a filter.")
     st.stop()
 
-# Common metrics and customer-level data
 gross = sales["gross_revenue"].sum()
 net = sales["net_revenue"].sum()
 cost = sales["total_cost"].sum()
-profit = net-cost
-margin = profit/net*100 if net else 0
+profit = net - cost
+margin = profit / net * 100 if net else 0
 orders = sales["sale_id"].nunique()
-period_days = max((end_date-start_date).days+1,1)
-prev_start = pd.Timestamp(start_date)-pd.Timedelta(days=period_days)
-prev_end = pd.Timestamp(start_date)-pd.Timedelta(days=1)
-prev = sales_all[sales_all["sale_date"].dt.date.between(prev_start.date(),prev_end.date())]
+
+period_days = max((end_date - start_date).days + 1, 1)
+prev_start = pd.Timestamp(start_date) - pd.Timedelta(days=period_days)
+prev_end = pd.Timestamp(start_date) - pd.Timedelta(days=1)
+prev = sales_all[sales_all["sale_date"].dt.date.between(prev_start.date(), prev_end.date())].copy()
+if region_filter != "All":
+    prev = prev[prev["region"] == region_filter]
+if store_filter != "All":
+    prev = prev[prev["store_name"] == store_filter]
+if category_filter != "All":
+    prev = prev[prev["category_name"] == category_filter]
 prev_net = prev["net_revenue"].sum()
-delta_net = (net-prev_net)/prev_net*100 if prev_net else np.nan
+delta_net = (net - prev_net) / prev_net * 100 if prev_net else np.nan
+
 rx = raw["fact_prescriptions"].copy()
-rx = rx.merge(raw["dim_stores"][["store_id","store_name","region"]],on="store_id",how="left")
-rx = rx.merge(raw["dim_products"][["product_id","category_id"]],on="product_id",how="left")
-rx = rx.merge(raw["dim_categories"],on="category_id",how="left")
-rx_filtered = rx[rx["issue_date"].dt.date.between(start_date,end_date)].copy()
+rx["issue_date"] = pd.to_datetime(rx.get("issue_date"), errors="coerce")
+rx = rx.merge(raw["dim_stores"][["store_id", "store_name", "region"]], on="store_id", how="left")
+rx = rx.merge(raw["dim_products"][["product_id", "category_id"]], on="product_id", how="left")
+rx = rx.merge(raw["dim_categories"], on="category_id", how="left")
+
+rx_dates = rx["issue_date"].dt.date
+rx_mask = rx_dates.between(start_date, end_date) & rx_dates.notna()
+rx_filtered = rx[rx_mask].copy()
 if region_filter != "All":
     rx_filtered = rx_filtered[rx_filtered["region"] == region_filter]
 if store_filter != "All":
@@ -606,16 +736,17 @@ if store_filter != "All":
 if category_filter != "All":
     rx_filtered = rx_filtered[rx_filtered["category_name"] == category_filter]
 
-# ---------------------------------------------------------------------
-# Sidebar navigation
-# ---------------------------------------------------------------------
-pages = ["Executive Overview","Sales Analysis","Customer Analysis",
-         "Product & Inventory Analysis","Store & Geographic Analysis","Customer Behavior Analysis"]
-page = st.sidebar.radio("WORKSPACE",pages,index=0)
+pages = [
+    "Executive Overview", "Sales Analysis", "Customer Analysis",
+    "Product & Inventory Analysis", "Store & Geographic Analysis",
+    "Customer Behavior Analysis",
+]
+page = st.sidebar.radio("WORKSPACE", pages, index=0)
 st.sidebar.markdown("---")
 st.sidebar.caption("Data model: Star Schema")
 st.sidebar.caption("Financial basis: net of discounts · product cost")
-st.sidebar.caption("Demo mode uses reproducible synthetic data.")
+if use_synthetic:
+    st.sidebar.caption("Demo mode uses reproducible synthetic data.")
 
 # ---------------------------------------------------------------------
 # Page 1 — Executive Overview
@@ -628,54 +759,129 @@ if page == "Executive Overview":
     with cols[2]: kpi("Profit Margin",pct(margin),"Net profit ÷ net revenue")
     with cols[3]: kpi("Total Orders",f"{orders:,}",f"{sales['customer_id'].nunique():,} unique customers",True)
 
+    # 1. Prepare Monthly Data for the Chart
     monthly=sales.groupby("month",as_index=False).agg(
         net_revenue=("net_revenue","sum"), total_cost=("total_cost","sum"),
         net_profit=("net_profit","sum"), gross_revenue=("gross_revenue","sum")
     )
     monthly["margin_pct"]=np.where(monthly["net_revenue"]!=0,monthly["net_profit"]/monthly["net_revenue"]*100,0)
-    monthly["revenue_label"]=monthly["net_revenue"].map(money)
-    monthly["profit_label"]=[f"{money(p)}\n{m:.1f}%" for p,m in zip(monthly["net_profit"],monthly["margin_pct"])]
+    monthly["cost_share_pct"]=np.where(monthly["net_revenue"]!=0,monthly["total_cost"]/monthly["net_revenue"]*100,0)
+    
+    # Inside each bar: segment share of net revenue only.
+    monthly["profit_label"]=np.where(
+        monthly["net_profit"]>=0,
+        monthly["margin_pct"].map(lambda v:f"{v:.1f}%"),
+        "",
+    )
+    monthly["cost_label"]=monthly["cost_share_pct"].map(lambda v:f"{v:.1f}%")
+
+    # 2. Build the Chart
     fig=go.Figure()
-    fig.add_bar(x=monthly["month"],y=monthly["total_cost"],name="Total Cost",
-                marker_color=INDIGO,hovertemplate="%{x|%b %Y}<br>Total Cost: $%{y:,.0f}<extra></extra>")
-    fig.add_bar(x=monthly["month"],y=monthly["net_profit"],name="Net Profit",
-                marker_color=AMBER,text=monthly["profit_label"],textposition="inside",
-                insidetextfont=dict(color=INK,size=11),
-                hovertemplate="%{x|%b %Y}<br>Net Profit: $%{y:,.0f}<extra></extra>")
-    fig.add_scatter(x=monthly["month"],y=monthly["net_revenue"],mode="text",
-                    text=monthly["revenue_label"],textposition="top center",name="Net Revenue",
-                    textfont=dict(color=INK,size=11),showlegend=False,hoverinfo="skip")
-    fig.update_layout(barmode="relative",bargap=.28,margin=dict(l=12,r=12,t=55,b=12),
-                      yaxis_title="Amount ($)",legend=dict(orientation="h",yanchor="bottom",y=1.02,x=0))
-    fig.update_yaxes(rangemode="tozero",tickprefix="$",tickformat=",.0f")
-    fig.update_xaxes(title_text="Month",tickformat="%b %Y")
+    
+    # Cost Bar
+    fig.add_bar(
+        x=monthly["month"], y=monthly["total_cost"], name="Total Cost",
+        marker_color=INDIGO,
+        text=monthly["cost_label"], textposition="inside", textangle=0,
+        insidetextanchor="middle", constraintext="none",
+        insidetextfont=dict(color="#FFFFFF", size=13),
+        hovertemplate="%{x|%b %Y}<br>Total Cost: $%{y:,.0f}<br>Share of net revenue: %{text}<extra></extra>"
+    )
+    
+    # Profit Bar
+    fig.add_bar(
+        x=monthly["month"], y=monthly["net_profit"], name="Net Profit",
+        marker_color=AMBER,
+        text=monthly["profit_label"], textposition="inside", textangle=0,
+        insidetextanchor="middle", constraintext="none",
+        insidetextfont=dict(color=INK, size=13),
+        hovertemplate="%{x|%b %Y}<br>Net Profit: $%{y:,.0f}<br>Margin: %{text}<extra></extra>"
+    )
+    
+    # Net Revenue above bars via annotations (prevents pushing the inside text)
+    for _, row in monthly.iterrows():
+        fig.add_annotation(
+            x=row["month"],
+            y=row["net_revenue"],
+            text=money(row["net_revenue"]),
+            showarrow=False,
+            yshift=12,
+            font=dict(color=INK, size=11)
+        )
+    
+    # Chart Layout
+    max_val = monthly["net_revenue"].max() if not monthly.empty else 0
+    fig.update_layout(
+        barmode="relative", 
+        bargap=0.28, 
+        margin=dict(l=12, r=12, t=55, b=12),
+        yaxis_title="Amount ($)", 
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
+    )
+    # Add headroom so annotations aren't clipped
+    fig.update_yaxes(rangemode="tozero", range=[0, max_val * 1.12], tickprefix="$", tickformat=",.0f")
+    fig.update_xaxes(title_text="Month", tickformat="%b %Y")
+    
     st.markdown('<div class="section-head">Monthly Net Revenue Composition</div>',unsafe_allow_html=True)
-    st.caption("Net revenue = total cost + net profit. Profit margin is displayed inside each profit segment.")
+    st.caption("Bars are sized in dollars; the percentage inside each bar is that segment's share of net revenue (cost share + margin = 100%).")
     if (monthly["net_profit"] < 0).any():
         st.info("At least one month has a net loss. Negative profit segments extend below zero, so those months do not appear as a conventional positive stacked total.")
-    show_chart(fig,"exec_monthly",height=380)
+    
+    show_chart(fig, "exec_monthly", height=380)
 
+    # 3. Side-by-side charts (Categories & Stores)
     left,right=st.columns(2)
-    prod=sales.groupby("product_name",as_index=False)["net_profit"].sum().nlargest(10,"net_profit").sort_values("net_profit")
-    f1=px.bar(prod,x="net_profit",y="product_name",orientation="h",title="Top 10 Products · Net Profit",labels={"net_profit":"Net Profit","product_name":""},color_discrete_sequence=[INDIGO])
+    
+    # Left: Top Categories (matching SQL: category_name, net_revenue, avg_discount, units)
+    cat = sales.groupby("category_name", as_index=False).agg(
+        net_revenue=("net_revenue", "sum"),
+        avg_discount=("discount_pct", "mean"),
+        units_sold=("quantity", "sum")
+    )
+    cat["avg_discount_pct"] = cat["avg_discount"] * 100
+    cat = cat.nlargest(10, "net_revenue").sort_values("net_revenue")
+    
+    f1 = px.bar(
+        cat, x="net_revenue", y="category_name", orientation="h",
+        title="Top Categories · Net Revenue",
+        labels={"net_revenue": "Net Revenue", "category_name": ""},
+        color_discrete_sequence=[INDIGO],
+        custom_data=["avg_discount_pct", "units_sold"]
+    )
+    f1.update_traces(
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Net Revenue: $%{x:,.2f}<br>"
+            "Avg Discount: %{customdata[0]:.2f}%<br>"
+            "Units Sold: %{customdata[1]:,.0f}<extra></extra>"
+        )
+    )
     with left:
-        show_chart(f1,"top_products")
-    store=sales.groupby(["store_name"],as_index=False).agg(net_revenue=("net_revenue","sum"),total_cost=("total_cost","sum"))
-    store["net_profit"]=store["net_revenue"]-store["total_cost"]
-    store["margin_pct"]=np.where(store["net_revenue"]!=0,store["net_profit"]/store["net_revenue"]*100,0)
+        show_chart(f1, "top_categories")
+
+    # Right: Top 10 Stores by Net Revenue
+    store = sales.groupby("store_name", as_index=False)["net_revenue"].sum()
     with right:
-        f2=px.bar(store.nlargest(10,"margin_pct").sort_values("margin_pct"),x="margin_pct",y="store_name",orientation="h",title="Top Stores · Profit Margin",labels={"margin_pct":"Margin %","store_name":""},color_discrete_sequence=[AMBER])
-        show_chart(f2,"top_stores")
+        f2 = px.bar(
+            store.nlargest(10, "net_revenue").sort_values("net_revenue"),
+            x="net_revenue", y="store_name", orientation="h",
+            title="Top Stores · Net Revenue",
+            labels={"net_revenue": "Net Revenue", "store_name": ""},
+            color_discrete_sequence=[AMBER]
+        )
+        show_chart(f2, "top_stores")
+
+    # 4. Executive Health Summary
     total_rx=len(rx_filtered)
     rx_per_order=total_rx/orders if orders else 0
     status="Healthy operating performance" if margin>=20 else "Monitor profitability and discount pressure" if margin>=10 else "Profitability requires management attention"
+    
     st.markdown(f"""
     <div class="panel"><div class="section-head">Executive Health Summary</div>
     <div style="font-size:19px;font-weight:800;color:{INDIGO}">{status}</div>
     <p style="color:{MUTED};margin:7px 0 0">The selected portfolio generated <b>{money(net)}</b> in net revenue and <b>{money(profit)}</b> in net profit at a <b>{margin:.1f}%</b> margin.
     There were <b>{total_rx:,}</b> prescriptions issued in the selected period ({rx_per_order:.2f} prescriptions per order as a directional workload indicator).
     Review store margin dispersion and discount leakage before scaling promotional activity.</p></div>""",unsafe_allow_html=True)
-
 # ---------------------------------------------------------------------
 # Page 2 — Sales Analysis
 # ---------------------------------------------------------------------
@@ -717,8 +923,6 @@ elif page == "Customer Analysis":
     asof=base["sale_date"].max()
     cust=base.groupby("customer_id").agg(last_purchase=("sale_date","max"),frequency=("sale_id","nunique"),monetary=("net_revenue","sum"),first_purchase=("sale_date","min")).reset_index()
     cust["recency"]=(asof-cust["last_purchase"]).dt.days
-    # NTILE(5)-style quintiles: recency is reversed because fewer days is better.
-    # Rank-percentile scoring also works for very small customer samples.
     def quintile_score(series, reverse=False):
         score=np.ceil(series.rank(method="first",pct=True)*5).clip(1,5).astype(int)
         return 6-score if reverse else score
@@ -773,7 +977,7 @@ elif page == "Product & Inventory Analysis":
     stock=raw["fact_stock_log"].merge(raw["dim_products"],on="product_id",how="left").merge(raw["dim_stores"][["store_id","store_name","region"]],on="store_id",how="left")
     stock["retail_value"]=stock["quantity"]*stock["unit_price"]
     stock["cost_value"]=stock["quantity"]*stock["cost_price"]
-    stock["is_below_reorder_level"]=stock["is_below_reorder_level"].fillna(False).astype(bool)
+    stock["is_below_reorder_level"]=_coerce_bool_series(stock["is_below_reorder_level"])
     expiry=stock["shelf_life_status"].astype(str)
     critical=int(expiry.isin(["Critical Danger","Expired on Receipt"]).sum())
     reorder=int(stock["is_below_reorder_level"].sum())
@@ -823,8 +1027,6 @@ elif page == "Store & Geographic Analysis":
     with c1:
         st.markdown('<div class="section-head">Geographic Revenue & Profit</div>',unsafe_allow_html=True)
         city=store.groupby(["region","city"],as_index=False).agg(net_revenue=("net_revenue","sum"),net_profit=("net_profit","sum"))
-        # City centroids are only supplied for the Egyptian demo locations. For a
-        # production network, store latitude/longitude should live in dim_stores.
         city_coords={"Cairo":(30.0444,31.2357),"New Cairo":(30.0074,31.4913),
                      "Giza":(29.9870,31.2118),"6th of October":(29.9285,30.9188),
                      "Alexandria":(31.2001,29.9187),"Tanta":(30.7865,31.0004),
@@ -857,7 +1059,6 @@ elif page == "Store & Geographic Analysis":
     metrics=["profit_margin_pct","net_revenue","customers","prescriptions_per_pharmacist"]
     labels=["Margin %","Net revenue","Unique customers","Rx / pharmacist"]
     network=store[metrics].mean(numeric_only=True)
-    # Normalize store and network values to 0-100 relative to the observed max for readable radar comparison.
     vals=[]; avg=[]
     for m in metrics:
         mx=store[m].replace([np.inf,-np.inf],np.nan).max()
@@ -898,7 +1099,6 @@ elif page == "Customer Behavior Analysis":
         st.markdown('<div class="section-head">Cohort by First Payment Method</div>',unsafe_allow_html=True)
         pay=first.groupby("first_payment").agg(customers=("customer_id","count"),repeat_rate=("total_orders",lambda x:(x>=2).mean()*100)).reset_index()
         show_chart(px.bar(pay,x="first_payment",y="repeat_rate",color="first_payment",labels={"first_payment":"First payment","repeat_rate":"Repeat conversion %"},color_discrete_sequence=PALETTE),"cohort_payment")
-    # Funnel thresholds match the SQL: >=1, >=2, >=5 distinct sale_id values.
     first_n=int((counts["total_orders"]>=1).sum())
     repeat_n=int((counts["total_orders"]>=2).sum())
     loyal_n=int((counts["total_orders"]>=5).sum())
@@ -909,7 +1109,6 @@ elif page == "Customer Behavior Analysis":
     fig=go.Figure(go.Funnel(y=funnel["stage"],x=funnel["customers"],textinfo="value+percent initial",marker=dict(color=[INDIGO, "#6366F1", AMBER]),connector={"line":{"color":"#CBD5E1","dash":"dot"}}))
     show_chart(fig,"customer_funnel")
     st.dataframe(funnel.rename(columns={"stage":"Funnel stage","customers":"Customers","conversion_from_previous_pct":"Conversion from previous %","dropoff":"Customer drop-off"}).style.format({"Conversion from previous %":"{:.1f}%"}),use_container_width=True,hide_index=True)
-    # Time to return is measured between each customer's first and second distinct transaction dates.
     ranked=tx.copy()
     ranked["order_rank"]=ranked.groupby("customer_id").cumcount()+1
     first_dates=ranked[ranked["order_rank"]==1][["customer_id","sale_date"]].rename(columns={"sale_date":"first_date"})
