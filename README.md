@@ -1,6 +1,6 @@
 # Meridian Health | Executive BI & Pharmacy Retail Analytics Suite
 
-An end-to-end **Pharmacy & Health Retail Business Intelligence Solution** combining a **PostgreSQL Star Schema analytical warehouse** (`sql/`) with a **6-page interactive Streamlit Executive BI Dashboard** (`app1.py`). Designed to track multi-store sales performance, profit margins, discount leakage, customer retention cohorts, pharmacist workload, and batch-level inventory expiration risks.
+An end-to-end **Pharmacy & Health Retail Business Intelligence Solution** combining a **PostgreSQL Star Schema analytical warehouse** (`sql/`) with a **6-page interactive Streamlit Executive BI Dashboard** (`app.py`). Designed to track multi-store sales performance, profit margins, discount leakage, customer retention cohorts, pharmacist workload, and batch-level inventory expiration risks.
 
 ---
 
