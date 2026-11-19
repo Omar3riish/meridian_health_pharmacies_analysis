@@ -5,7 +5,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Star_Schema-336791?style=for-the-badge&logo=postgresql&logoColor=white)
 ![Plotly](https://img.shields.io/badge/Plotly-Interactive_Charts-3F4F75?style=for-the-badge&logo=plotly&logoColor=white)
 
-An end-to-end **Pharmacy & Health Retail Business Intelligence Solution** combining a **PostgreSQL Star Schema analytical warehouse** (`sql/`) with a **6-page interactive Streamlit Executive BI Dashboard** (`app1.py`). Designed to track multi-store sales performance, profit margins, discount leakage, customer retention cohorts, pharmacist workload, and batch-level inventory expiration risks.
+An end-to-end **Pharmacy & Health Retail Business Intelligence Solution** combining a **PostgreSQL Star Schema analytical warehouse** (`sql/`) with a **6-page interactive Streamlit Executive BI Dashboard** (`app.py`). Designed to track multi-store sales performance, profit margins, discount leakage, customer retention cohorts, pharmacist workload, and batch-level inventory expiration risks.
 
 ---
 
@@ -37,7 +37,7 @@ Across **9,900 transactions**, **23,790 units sold**, **10,000 prescriptions**, 
 
 ```text
 meridian-health-bi/
-├── app1.py                                          # 6-page Streamlit Executive BI Dashboard
+├── app.py                                           # 6-page Streamlit Executive BI Dashboard
 ├── data/                                            # Star Schema CSV tables (dim_* and fact_*)
 ├── sql/
 │   ├── 01_schema_and_base_views.sql                 # Table standardization & enriched analytical views
@@ -150,5 +150,5 @@ To evaluate clinical workload alongside retail profitability (`06_store_and_phar
    * **Demo Mode:** Set `USE_SYNTHETIC_DATA=true` to run with built-in reproducible synthetic data.
 3. **Launch the BI Suite:**
    ```bash
-   streamlit run app1.py
+   streamlit run app.py
    ```
